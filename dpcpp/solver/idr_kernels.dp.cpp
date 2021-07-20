@@ -38,6 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 #include <CL/sycl.hpp>
+#include <oneapi/dpl/random>
 
 
 #include <ginkgo/core/base/exception_helpers.hpp>
@@ -178,7 +179,7 @@ void orthonormalize_subspace_vectors_kernel(
         */
         item_ct1.barrier();
 
-        norm = std::sqrt((float)(reduction_helper_real[0]));
+        norm = std::sqrt(reduction_helper_real[0]);
         for (size_type j = tidx; j < num_cols; j += block_size) {
             values[row * stride + j] /= norm;
         }
@@ -646,17 +647,34 @@ void initialize_subspace_vectors(std::shared_ptr<const DpcppExecutor> exec,
 {
     if (deterministic) {
         auto subspace_vectors_data = matrix_data<ValueType>(
-            subspace_vectors->get_size(), std::normal_distribution<>(0.0, 1.0),
+            subspace_vectors->get_size(),
+            std::normal_distribution<remove_complex<ValueType>>(0.0, 1.0),
             std::ranlux48(15));
         subspace_vectors->read(subspace_vectors_data);
     } else {
-        GKO_NOT_IMPLEMENTED;
-        // auto gen =
-        //     curand::rand_generator(time(NULL), CURAND_RNG_PSEUDO_DEFAULT);
-        // curand::rand_vector(
-        //     gen,
-        //     subspace_vectors->get_size()[0] * subspace_vectors->get_stride(),
-        //     0.0, 1.0, subspace_vectors->get_values());
+        auto size = subspace_vectors->get_size();
+        auto stride = subspace_vectors->get_stride();
+        auto values = subspace_vectors->get_values();
+        exec->get_queue()->submit([&](sycl::handler &cgh) {
+            cgh.parallel_for(
+                sycl::range<1>(size[0] * size[1]), [=](sycl::item<1> idx) {
+                    std::uint64_t offset = idx.get_linear_id();
+
+                    // Create minstd_rand engine
+                    oneapi::dpl::minstd_rand engine(132, offset);
+
+                    // Create uniform_real_distribution distribution
+                    oneapi::dpl::uniform_real_distribution<
+                        remove_complex<ValueType>>
+                        distr;
+
+                    // Generate random number
+                    auto res = distr(engine);
+
+                    // Store results to x_acc
+                    values[idx / size[1] * stride + idx % size[1]] = res;
+                });
+        });
     }
 }
 
