@@ -381,6 +381,25 @@ template <typename ValueType>
             auto fail = ::testing::AssertionFailure();
             fail << "Array " << first_expression << " is different from "
                  << second_expression << " at index " << i << "\n";
+            constexpr auto context_size = 5;
+            const auto context_begin = i >= context_size ? i - context_size : 0;
+            const auto context_end =
+                i + context_size <= num_elems1 ? i + context_size : num_elems1;
+            if (i > context_size) {
+                fail << "...\n";
+            }
+            for (auto j = context_begin; j < context_end; j++) {
+                fail << (j == i ? "> " : "  ")
+                     << ::testing::PrintToString(
+                            first_array.get_const_data()[j])
+                     << ','
+                     << ::testing::PrintToString(
+                            second_array.get_const_data()[j])
+                     << '\n';
+            }
+            if (i + context_size < num_elems1) {
+                fail << "...\n";
+            }
             return fail;
         }
     }
