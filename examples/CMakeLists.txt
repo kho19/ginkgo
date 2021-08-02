@@ -46,6 +46,23 @@ else()
     message(STATUS "No OpenCV found, disabling heat-equation example")
 endif()
 
+find_package(VTK COMPONENTS
+        CommonColor
+        CommonCore
+        IOGeometry
+        InteractionStyle
+        RenderingContextOpenGL2
+        RenderingCore
+        RenderingFreeType
+        RenderingGL2PSOpenGL2
+        RenderingOpenGL2
+        QUIET)
+if (VTK_FOUND)
+    list(APPEND EXAMPLES_LIST fem-reaction-diffusion-equation)
+else()
+    message(STATUS "No VTK found, disabling fem-reaction-diffusion-equation example")
+endif()
+
 if(GINKGO_HAVE_PAPI_SDE)
     list(APPEND EXAMPLES_LIST papi-logging)
 endif()
