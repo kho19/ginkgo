@@ -35,7 +35,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <ginkgo/ginkgo.hpp>
 #include <limits>
 #include <map>
-#include <sstream>
 #include <string>
 
 mesh parse_obj(std::istream &stream)
@@ -80,13 +79,15 @@ double tri_area(const std::array<point_id, 3> &tri, const mesh &m)
     temp2.at(0) = m.points.at(tri.at(0)).at(0) - m.points.at(tri.at(2)).at(0);
     temp2.at(1) = m.points.at(tri.at(0)).at(1) - m.points.at(tri.at(2)).at(1);
     temp2.at(2) = m.points.at(tri.at(0)).at(2) - m.points.at(tri.at(2)).at(2);
-    auto area = std::sqrt(
-        std::pow(temp1.at(1) * temp2.at(2) - temp1.at(2) * temp2.at(1),
-                 (int)2) +
-        std::pow(temp1.at(2) * temp2.at(0) - temp1.at(0) * temp2.at(2),
-                 (int)2) +
-        std::pow(temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0),
-                 (int)2));
+    auto area =
+        0.5 *
+        std::sqrt(
+            std::pow(temp1.at(1) * temp2.at(2) - temp1.at(2) * temp2.at(1),
+                     (int)2) +
+            std::pow(temp1.at(2) * temp2.at(0) - temp1.at(0) * temp2.at(2),
+                     (int)2) +
+            std::pow(temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0),
+                     (int)2));
     return area;
 }
 
@@ -105,9 +106,9 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
     auto G2 = gko::initialize<gko::matrix::Dense<>>(
         {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, exec);
 
+    double r, c, s;
 
-    /// Continue debugging here. SIGSEV. Probs accessing something that doesnt
-    /// exist with the three at().
+
     // Vector 0 -> 1
     temp1.push_back(m.points.at(tri.at(1)).at(0) -
                     m.points.at(tri.at(0)).at(0));
@@ -124,13 +125,14 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
                     m.points.at(tri.at(0)).at(2));
 
     // area of triangle
-    area = std::sqrt(
-        std::pow(temp1.at(1) * temp2.at(2) - temp1.at(2) * temp2.at(1),
-                 (int)2) +
-        std::pow(temp1.at(2) * temp2.at(0) - temp1.at(0) * temp2.at(2),
-                 (int)2) +
-        std::pow(temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0),
-                 (int)2));
+    area = 0.5 *
+           std::sqrt(
+               std::pow(temp1.at(1) * temp2.at(2) - temp1.at(2) * temp2.at(1),
+                        (int)2) +
+               std::pow(temp1.at(2) * temp2.at(0) - temp1.at(0) * temp2.at(2),
+                        (int)2) +
+               std::pow(temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0),
+                        (int)2));
     assert(area != 0);
 
     // tri normal vector via cross product
@@ -148,12 +150,19 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
             {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}, exec);
     } else {
         // givens rotation x -> 0
+        // the signbit ensures that rotation always occurs to give a normal
+        // vector pointing in positive z direction.
         auto sign = std::signbit(normal->at(0)) == std::signbit(normal->at(2))
                         ? 1.0
                         : -1.0;
-        auto r = std::hypot(normal->at(0), normal->at(2));
-        auto c = std::abs(normal->at(2)) / r;
-        auto s = sign * std::abs(normal->at(0)) / r;
+        r = std::hypot(normal->at(0), normal->at(2));
+        if (r < std::numeric_limits<double>::min() * 10) {
+            c = 1;
+            s = 0;
+        } else {
+            c = std::abs(normal->at(2)) / r;
+            s = sign * std::abs(normal->at(0)) / r;
+        }
         G1 = gko::initialize<gko::matrix::Dense<>>(
             {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}}, exec);
         auto temp_normal =
