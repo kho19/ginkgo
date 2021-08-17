@@ -35,7 +35,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <algorithm>
 #include <cmath>
 #include <random>
-#include <string>
 
 #include <vtkActor.h>
 #include <vtkCamera.h>
@@ -58,8 +57,8 @@ using executor = gko::ReferenceExecutor;
 
 class timer : public vtkCommand {
 public:
-    timer(double tau, vtkProgrammableFilter *filter,
-          vtkRenderWindowInteractor *interactor)
+    timer(double tau, vtkProgrammableFilter* filter,
+          vtkRenderWindowInteractor* interactor)
         : filter{filter}, interactor{interactor}
     {
         interactor->AddObserver(vtkCommand::TimerEvent, this);
@@ -67,7 +66,7 @@ public:
             static_cast<unsigned long>(tau * 1000));
     }
 
-    virtual void Execute(vtkObject *caller, unsigned long event_id, void *)
+    virtual void Execute(vtkObject* caller, unsigned long event_id, void*)
     {
         if (vtkCommand::TimerEvent == event_id) {
             filter->Modified();
@@ -76,15 +75,15 @@ public:
     }
 
 private:
-    vtkProgrammableFilter *filter;
-    vtkRenderWindowInteractor *interactor;
+    vtkProgrammableFilter* filter;
+    vtkRenderWindowInteractor* interactor;
 };
 
 
 struct animation_state {
-    vtkProgrammableFilter *filter;
-    vtkDataArray *data;
-    mesh *m;
+    vtkProgrammableFilter* filter;
+    vtkDataArray* data;
+    mesh* m;
     double time;
     double tau;
     double f;
@@ -95,16 +94,15 @@ struct animation_state {
     std::shared_ptr<dense_mtx> v2;
     std::shared_ptr<mtx> MminusA_u;
     std::shared_ptr<mtx> MminusA_v;
-    std::unique_ptr<gko::solver::Cg<>> solver_u;
-    std::unique_ptr<gko::solver::Cg<>> solver_v;
+    std::unique_ptr<gko::solver::Cg<>> solver_M;
     std::shared_ptr<executor> exec;
 };
 
 
-void generate_MA(const navigatable_mesh &m,
-                 gko::matrix_assembly_data<double, int> &M,
-                 gko::matrix_assembly_data<double, int> &A,
-                 const std::shared_ptr<gko::OmpExecutor> &exec)
+void generate_MA(const navigatable_mesh& m,
+                 gko::matrix_assembly_data<double, int>& M,
+                 gko::matrix_assembly_data<double, int>& A,
+                 const std::shared_ptr<executor>& exec)
 {
     /* special helper matrix
      * |x2-x1, x0-x2, x1-x0|
@@ -142,10 +140,12 @@ void generate_MA(const navigatable_mesh &m,
     }
 }
 
-inline void set_init_val(const navigatable_mesh &m, const edge_id edge,
-                         gko::matrix_data<> &init_data)
+// TODO: make the initialisation nicer. Do not need three functions for this
+// step
+inline void set_init_val(const navigatable_mesh& m, const edge_id edge,
+                         gko::matrix_data<>& init_data)
 {
-    for (auto &nonzero : init_data.nonzeros) {
+    for (auto& nonzero : init_data.nonzeros) {
         if (nonzero.row == m.halfedges.at(edge).end) {
             nonzero.value = 1.0;
             break;
@@ -154,8 +154,8 @@ inline void set_init_val(const navigatable_mesh &m, const edge_id edge,
 }
 
 inline void init_from_seed_edge(const halfedge_id seed_edge,
-                                navigatable_mesh &m,
-                                gko::matrix_data<> &init_v_data)
+                                navigatable_mesh& m,
+                                gko::matrix_data<>& init_v_data)
 {
     halfedge_id level1_edge = m.next_around_point(seed_edge);
     // loop until starting point reached
@@ -172,10 +172,10 @@ inline void init_from_seed_edge(const halfedge_id seed_edge,
     }
 }
 
-void init_uv(gko::matrix_data<> &init_u_data, gko::matrix_data<> &init_v_data,
-             navigatable_mesh &m)
+void init_uv(gko::matrix_data<>& init_u_data, gko::matrix_data<>& init_v_data,
+             navigatable_mesh& m)
 {
-    int num_seeds = 40;
+    int num_seeds = 2;
     std::random_device dev;
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist(
@@ -197,138 +197,39 @@ void init_uv(gko::matrix_data<> &init_u_data, gko::matrix_data<> &init_v_data,
     }
 }
 
-void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
-            double f, double k, double tau,
-            const std::shared_ptr<gko::OmpExecutor> &exec)
+void nonlin_update(std::shared_ptr<dense_mtx>& u, std::shared_ptr<dense_mtx>& v,
+                   double f, double k, double tau)
 {
-    /*
-     * Solve du/dt = F with F nonlinear u = [u,v] :P
-     * u_n+1 = u_n + tau*F(u_n)
-     * def G = u_n + tau*F(u_n) - u_n+1 and solve G = 0
-     * Iterate u = u-delta_u
-     * delta_u = (grad(G))^-1*G
-     *
-     *             |tau*dF2/dv-1  -tau*dF1/dv|
-     * grad(G)^-1 =| |/((tau*dF1/du-1)*(tau*dF2/dv-1)-tau^2*dF2/du*dF1/dv)
-     *             |-tau*dF2/du  tau*dF1/du-1|
-     */
     auto nelems = u->get_num_stored_elements();
-    auto alpha_one = gko::initialize<dense_mtx>({1}, exec);
-    auto alpha_zero = gko::initialize<dense_mtx>({0}, exec);
-    auto norm_du = gko::initialize<dense_mtx>({0}, exec);
-    auto norm_dv = gko::initialize<dense_mtx>({0}, exec);
-
-    // must work with row vectors here
-    auto u0 = gko::as<dense_mtx>(u->transpose());
-    auto v0 = gko::as<dense_mtx>(v->transpose());
-    // init vectors for newton
-    auto tauF1 = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto tauF2 = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto dG1du = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto dG1dv = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto dG2du = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto dG2dv = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto dets = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-
     for (int i = 0; i < nelems; ++i) {
-        tauF1->at(0, i) =
-            tau * (-u0->at(0, i) * (v0->at(0, i) * v0->at(0, i) + f) + f);
-        tauF2->at(0, i) =
-            tau * (v0->at(0, i) * (u0->at(0, i) * v0->at(0, i) - (f + k)));
-        dG1du->at(0, i) = -tau * (v0->at(0, i) * v0->at(0, i) + f) - 1;
-        dG1dv->at(0, i) = -tau * 2 * u0->at(0, i) * v0->at(0, i);
-        dG2du->at(0, i) = tau * v0->at(0, i) * v0->at(0, i);
-        dG2dv->at(0, i) = tau * (2 * u0->at(0, i) * v0->at(0, i) - (f + k)) - 1;
-        dets->at(0, i) = (dG1du->at(0, i) * dG2dv->at(0, i) -
-                          dG1dv->at(0, i) * dG2du->at(0, i));
+        u->at(i, 0) =
+            u->at(i, 0) +
+            tau * (-u->at(i, 0) * (v->at(i, 0) * v->at(i, 0) + f) + f);
+        v->at(i, 0) =
+            v->at(i, 0) +
+            tau * (v->at(i, 0) * (u->at(i, 0) * v->at(i, 0) - (f + k)));
     }
-
-    // declare vectors that are updated every iteration
-    auto G1 = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto G2 = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto u1 = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto v1 = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto du = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-    auto dv = gko::share(dense_mtx::create_with_type_of(
-        alpha_one.get(), exec, gko::dim<2>(1, nelems)));
-
-    u1->copy_from(gko::lend(u0));
-    v1->copy_from(gko::lend(v0));
-    int iter = 0;
-    while (true) {
-        G1->copy_from(gko::lend(u0));
-        G1->sub_scaled(gko::lend(alpha_one), gko::lend(u1));
-        G1->add_scaled(gko::lend(alpha_one), gko::lend(tauF1));
-
-        G2->copy_from(gko::lend(v0));
-        G2->sub_scaled(gko::lend(alpha_one), gko::lend(v1));
-        G2->add_scaled(gko::lend(alpha_one), gko::lend(tauF2));
-
-        du->copy_from(gko::lend(G1));
-        du->scale(gko::lend(dG2dv));
-        du->sub_scaled(gko::lend(dG2du), gko::lend(G2));
-        du->inv_scale(gko::lend(dets));
-
-        dv->copy_from(gko::lend(G2));
-        dv->scale(gko::lend(dG1du));
-        dv->sub_scaled(gko::lend(dG1dv), gko::lend(G1));
-        dv->inv_scale(gko::lend(dets));
-
-        // update u and v
-        u1->sub_scaled(gko::lend(alpha_one), gko::lend(du));
-        v1->sub_scaled(gko::lend(alpha_one), gko::lend(dv));
-        // halt if accuracy requirement fulfilled
-        gko::as<dense_mtx>(du->transpose())->compute_norm2(norm_du.get());
-        gko::as<dense_mtx>(dv->transpose())->compute_norm2(norm_dv.get());
-
-        std::cout << "Iteration: " << iter;
-        ++iter;
-        //        print_mat(dv);
-        print_mat(norm_dv);
-        if (norm_du->at(0, 0) + norm_dv->at(0, 0) < 1e-3) break;
-    }
-    u->copy_from(gko::as<dense_mtx>(u1->transpose()));
-    v->copy_from(gko::as<dense_mtx>(v1->transpose()));
 }
 
-
-void animate(void *data)
+void animate(void* data)
 {
-    auto state = static_cast<animation_state *>(data);
+    auto state = static_cast<animation_state*>(data);
     std::cout << state->time << std::endl;
     state->time += state->tau;
-
     // Simulation step
     auto start_time = std::chrono::steady_clock::now();
-    std::cout << "First CN\n";
-
+    // Update diffusion term (half step: strang splitting)
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
-    state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->solver_M->apply(gko::lend(state->u2), gko::lend(state->u1));
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
-    state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
-    std::cout << "Newton start\n";
-
-    // Newton for nonlinear term
-    newton(state->u1, state->v1, state->f, state->k, state->tau, state->exec);
-    std::cout << "Newton stop\n";
-
-    // Remaining Crank-Nicolson half step
+    state->solver_M->apply(gko::lend(state->v2), gko::lend(state->v1));
+    // Update nonlinear term
+    nonlin_update(state->u1, state->v1, state->f, state->k, state->tau);
+    // Update diffusion term
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
-    state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->solver_M->apply(gko::lend(state->u2), gko::lend(state->u1));
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
-    state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
+    state->solver_M->apply(gko::lend(state->v2), gko::lend(state->v1));
     auto stop_time = std::chrono::steady_clock::now();
     auto runtime = static_cast<double>(
                        std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -353,29 +254,33 @@ int main()
     /// Construct mesh from obj file
     vtkNew<vtkNamedColors> colors;
     std::ifstream stream{
-        "../../../examples/fem-reaction-diffusion-equation/data/dragon.obj"};
+        "../../../examples/fem-reaction-diffusion-equation/data/sphere6.obj"};
     auto init_m = parse_obj(stream);
     auto m = navigatable_mesh(init_m);
     auto poly_data = init_m.to_vtk();
 
-    /// Define parameters
-    // these parameters produced sensible results
-    //    auto Du = 0.02;
-    //    auto Dv = 0.01;
-    //    auto f = 0.055;
-    //    auto k = 0.062;
+    /// Define model parameters
     // diffusion factors
-    auto Du = 0.02;
-    auto Dv = 0.01;
+    //    auto Du = 0.0025;
+    //    auto Dv = 0.00125;
+    //    // feed and kill rates
+    //    auto f = 0.038;
+    //    auto k = 0.061;
+    //    // number of simulation steps per second
+    //    auto steps_per_sec = 10;
+    // TODO: unstable factors for explicit update
+    // diffusion factors
+    auto Du = 0.01;
+    auto Dv = 0.005;
     // feed and kill rates
-    auto f = 0.055;
-    auto k = 0.062;
+    auto f = 0.038;
+    auto k = 0.061;
     // number of simulation steps per second
-    auto steps_per_sec = 4;
+    auto steps_per_sec = 30;
     // time step size for the simulation
     auto tau = 1.0 / steps_per_sec;
+
     /// Construct mass (M) and stiffness (A) matrices
-    // actually use these to construct the matrices needed for implicit step
     auto exec = executor::create();
     auto nelems = m.points.size();
     auto M_data =
@@ -390,30 +295,18 @@ int main()
     auto A = gko::share(mtx::create(exec));
     A->read(A_data);
 
-    /// Construct matrices for Crank-Nicolson
+    /// Construct matrices for explicit Euler
     // nxn unit matrix
     auto ones = gko::share(mtx::create(exec));
     auto ones_data = gko::matrix_data<>::diag(gko::dim<2>(nelems, nelems), 1.0);
     ones->read(ones_data);
     auto beta = gko::initialize<dense_mtx>({1}, exec);
 
-    // M + (tau/4)*Du*A
-    auto alpha = gko::initialize<dense_mtx>({tau * Du / 4}, exec);
-    auto MplusA_u = gko::share(gko::clone(exec, M));
-    A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
-             gko::lend(MplusA_u));
-
     // M - (tau/4)*Du*A
-    alpha->at(0, 0) = -tau * Du / 4;
+    auto alpha = gko::initialize<dense_mtx>({-tau * Du / 4}, exec);
     auto MminusA_u = gko::share(gko::clone(exec, M));
     A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
              gko::lend(MminusA_u));
-
-    // M + (tau/4)*Dv*A
-    alpha->at(0, 0) = tau * Dv / 4;
-    auto MplusA_v = gko::share(gko::clone(exec, M));
-    A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
-             gko::lend(MplusA_v));
 
     // M - (tau/4)*Dv*A
     alpha->at(0, 0) = -tau * Dv / 4;
@@ -435,22 +328,19 @@ int main()
         alpha.get(), exec, gko::dim<2>(nelems, 1)));
     u1->read(init_u_data);
     v1->read(init_v_data);
-    //    print_mat(u1);
-    //    print_mat(v1);
 
-
-    /// Generate solvers
+    /// Generate solver
+    // use Ic or Jacobi
     auto solver_gen =
         gko::solver::Cg<>::build()
-            .with_preconditioner(gko::preconditioner::Ic<>::build().on(exec))
+            .with_preconditioner(
+                gko::preconditioner::Jacobi<>::build().on(exec))
             .with_criteria(gko::stop::RelativeResidualNorm<>::build()
-                               .with_tolerance(1e-10)
+                               .with_tolerance(1e-6)
                                .on(exec))
             .on(exec);
 
-    auto solver_u = solver_gen->generate(MplusA_u);
-    auto solver_v = solver_gen->generate(MplusA_v);
-
+    auto solver_M = solver_gen->generate(M);
     vtkNew<vtkProgrammableFilter> filter;
 
     animation_state state{filter,
@@ -466,8 +356,7 @@ int main()
                           std::move(v2),
                           std::move(MminusA_u),
                           std::move(MminusA_v),
-                          std::move(solver_u),
-                          std::move(solver_v),
+                          std::move(solver_M),
                           std::move(exec)};
     state.data->SetNumberOfComponents(1);
     state.data->SetNumberOfTuples(init_m.points.size());

@@ -37,6 +37,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <map>
 #include <string>
 
+//#ifndef GKO_EXEC
+//#define GKO_EXEC 1
+//#endif
+
+#if GKO_EXEC == 1
+using executor = gko::CudaExecutor;
+#elif GKO_EXEC == 2
+using executor = gko::OmpExecutor;
+#elif GKO_EXEC == 3
+using executor = gko::ReferenceExecutor;
+#endif  // GKO_EXEC
 
 mesh parse_obj(std::istream &stream)
 {
@@ -94,7 +105,7 @@ double tri_area(const std::array<point_id, 3> &tri, const mesh &m)
 
 void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
                    std::unique_ptr<gko::matrix::Dense<double>> &tri_2D,
-                   double &area, const std::shared_ptr<gko::Executor> &exec)
+                   double &area, const std::shared_ptr<executor> &exec)
 {
     std::vector<double> temp1;
     temp1.reserve(3);
@@ -145,6 +156,9 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
 
     // check that normal vector doesn't already (almost) point in z direction
     // TODO: is 10*min a good value?
+#if GKO_EXEC == 1
+    exec->synchronize();
+#endif
     if (std::hypot(normal->at(0), normal->at(1)) <
         std::numeric_limits<double>::min() * 10) {
         G = gko::initialize<gko::matrix::Dense<>>(
@@ -168,12 +182,16 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
             {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}}, exec);
         auto temp_normal =
             gko::initialize<gko::matrix::Dense<>>({0.0, 0.0, 0.0}, exec);
+
         G1->apply(gko::lend(normal), gko::lend(temp_normal));
 
         // givens rotation y -> 0
         sign = std::signbit(normal->at(1)) == std::signbit(normal->at(2))
                    ? 1.0
                    : -1.0;
+#if GKO_EXEC == 1
+        exec->synchronize();
+#endif
         r = std::hypot(temp_normal->at(1), temp_normal->at(2));
         c = std::abs(temp_normal->at(2)) / r;
         s = sign * std::abs(temp_normal->at(1)) / r;
@@ -199,9 +217,6 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
     }
     // apply givens rotation reusing G2
     G->apply(gko::lend(G1), gko::lend(G2));
-    // TODO: could do this without givens rotation? Just subtract z values as
-    // well?
-
     /* construct special matrix
      * |x2-x1, x0-x2, x1-x0|
      * |y2-y1, y0-y2, y1-y0|
@@ -213,30 +228,6 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
     }
 }
 
-
-vtkNew<vtkPolyData> mesh::to_vtk() const
-{
-    vtkNew<vtkPoints> out_points;
-    out_points->SetNumberOfPoints(points.size());
-    for (vtkIdType i = 0; i < points.size(); i++) {
-        auto point = points[i];
-        out_points->SetPoint(i, point[0], point[1], point[2]);
-    }
-    vtkNew<vtkCellArray> out_triangles;
-    for (vtkIdType i = 0; i < triangles.size(); i++) {
-        auto triangle = triangles[i];
-        out_triangles->InsertNextCell(3);
-        out_triangles->InsertCellPoint(triangle[0]);
-        out_triangles->InsertCellPoint(triangle[1]);
-        out_triangles->InsertCellPoint(triangle[2]);
-    }
-    vtkNew<vtkPolyData> out;
-    out->SetPoints(out_points);
-    out->SetPolys(out_triangles);
-    return out;
-}
-
-///
 navigatable_mesh::navigatable_mesh(mesh m) : mesh{std::move(m)}
 {
     halfedges.reserve(triangles.size() * 3);

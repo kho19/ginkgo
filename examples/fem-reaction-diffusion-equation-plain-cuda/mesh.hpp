@@ -32,11 +32,22 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
-#include <vtkPolyData.h>
 #include <array>
 #include <ginkgo/ginkgo.hpp>
 #include <istream>
 #include <vector>
+
+#ifndef GKO_EXEC
+#define GKO_EXEC 3
+#endif
+
+#if GKO_EXEC == 1
+using executor = gko::CudaExecutor;
+#elif GKO_EXEC == 2
+using executor = gko::OmpExecutor;
+#elif GKO_EXEC == 3
+using executor = gko::ReferenceExecutor;
+#endif  // GKO_EXEC
 
 using point_id = int;
 using halfedge_id = int;
@@ -57,8 +68,6 @@ struct halfedge {
 struct mesh {
     std::vector<std::array<double, 3>> points;
     std::vector<std::array<point_id, 3>> triangles;
-
-    vtkNew<vtkPolyData> to_vtk() const;
 };
 
 mesh parse_obj(std::istream &stream);
@@ -79,4 +88,4 @@ struct navigatable_mesh : mesh {
 
 void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
                    std::unique_ptr<gko::matrix::Dense<double>> &tri_2D,
-                   double &area, const std::shared_ptr<gko::Executor> &exec);
+                   double &area, const std::shared_ptr<executor> &exec);
