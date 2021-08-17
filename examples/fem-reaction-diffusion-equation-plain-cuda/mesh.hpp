@@ -32,7 +32,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
-#include <vtkPolyData.h>
 #include <array>
 #include <ginkgo/ginkgo.hpp>
 #include <istream>
@@ -57,8 +56,6 @@ struct halfedge {
 struct mesh {
     std::vector<std::array<double, 3>> points;
     std::vector<std::array<point_id, 3>> triangles;
-
-    vtkNew<vtkPolyData> to_vtk() const;
 };
 
 mesh parse_obj(std::istream &stream);

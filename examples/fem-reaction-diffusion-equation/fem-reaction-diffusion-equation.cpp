@@ -175,7 +175,7 @@ inline void init_from_seed_edge(const halfedge_id seed_edge,
 void init_uv(gko::matrix_data<> &init_u_data, gko::matrix_data<> &init_v_data,
              navigatable_mesh &m)
 {
-    int num_seeds = 40;
+    int num_seeds = 2;
     std::random_device dev;
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist(
@@ -293,11 +293,10 @@ void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
         gko::as<dense_mtx>(du->transpose())->compute_norm2(norm_du.get());
         gko::as<dense_mtx>(dv->transpose())->compute_norm2(norm_dv.get());
 
-        std::cout << "Iteration: " << iter;
+        std::cout << "Netwon iteration: " << iter;
         ++iter;
-        //        print_mat(dv);
         print_mat(norm_dv);
-        if (norm_du->at(0, 0) + norm_dv->at(0, 0) < 1e-3) break;
+        if (norm_du->at(0, 0) + norm_dv->at(0, 0) < 1e-6) break;
     }
     u->copy_from(gko::as<dense_mtx>(u1->transpose()));
     v->copy_from(gko::as<dense_mtx>(v1->transpose()));
@@ -312,17 +311,13 @@ void animate(void *data)
 
     // Simulation step
     auto start_time = std::chrono::steady_clock::now();
-    std::cout << "First CN\n";
-
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
     state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
     state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
-    std::cout << "Newton start\n";
 
     // Newton for nonlinear term
     newton(state->u1, state->v1, state->f, state->k, state->tau, state->exec);
-    std::cout << "Newton stop\n";
 
     // Remaining Crank-Nicolson half step
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
@@ -359,17 +354,29 @@ int main()
     auto poly_data = init_m.to_vtk();
 
     /// Define parameters
-    // these parameters produced sensible results
+    // these parameters produced sensible results for dragon
     //    auto Du = 0.02;
     //    auto Dv = 0.01;
     //    auto f = 0.055;
     //    auto k = 0.062;
+
+    //    auto Du = 0.01;
+    //    auto Dv = 0.006;
+    //    auto f = .018;
+    //    auto k = .051;
+    //    auto steps_per_sec = 4;
+    // for torus
+    //    auto Du = 0.05;
+    //    auto Dv = 0.025;
+    //    // feed and kill rates
+    //    auto f = 0.052;
+    //    auto k = 0.068;
     // diffusion factors
-    auto Du = 0.02;
-    auto Dv = 0.01;
+    auto Du = 0.01;
+    auto Dv = 0.005;
     // feed and kill rates
-    auto f = 0.055;
-    auto k = 0.062;
+    auto f = 0.038;
+    auto k = 0.061;
     // number of simulation steps per second
     auto steps_per_sec = 4;
     // time step size for the simulation
@@ -389,6 +396,16 @@ int main()
     M->read(M_data);
     auto A = gko::share(mtx::create(exec));
     A->read(A_data);
+
+    // write M and A to file
+    //    std::ofstream
+    //    Astream("../../../examples/fem-reaction-diffusion-equation/data/A.dat");
+    //    std::ofstream
+    //    Mstream("../../../examples/fem-reaction-diffusion-equation/data/M.dat");
+    //    gko::write(Astream, gko::lend(A), gko::layout_type::coordinate);
+    //    gko::write(Mstream, gko::lend(M), gko::layout_type::coordinate);
+    //    return 0;
+
 
     /// Construct matrices for Crank-Nicolson
     // nxn unit matrix
@@ -435,16 +452,15 @@ int main()
         alpha.get(), exec, gko::dim<2>(nelems, 1)));
     u1->read(init_u_data);
     v1->read(init_v_data);
-    //    print_mat(u1);
-    //    print_mat(v1);
 
-
-    /// Generate solvers
+    /// Generate solver
+    // use Ic, Jacobi or GeneralIsai
     auto solver_gen =
         gko::solver::Cg<>::build()
-            .with_preconditioner(gko::preconditioner::Ic<>::build().on(exec))
+            .with_preconditioner(
+                gko::preconditioner::Jacobi<>::build().on(exec))
             .with_criteria(gko::stop::RelativeResidualNorm<>::build()
-                               .with_tolerance(1e-10)
+                               .with_tolerance(1e-6)
                                .on(exec))
             .on(exec);
 

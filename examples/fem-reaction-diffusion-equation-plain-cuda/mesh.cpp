@@ -209,29 +209,6 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
     }
 }
 
-
-vtkNew<vtkPolyData> mesh::to_vtk() const
-{
-    vtkNew<vtkPoints> out_points;
-    out_points->SetNumberOfPoints(points.size());
-    for (vtkIdType i = 0; i < points.size(); i++) {
-        auto point = points[i];
-        out_points->SetPoint(i, point[0], point[1], point[2]);
-    }
-    vtkNew<vtkCellArray> out_triangles;
-    for (vtkIdType i = 0; i < triangles.size(); i++) {
-        auto triangle = triangles[i];
-        out_triangles->InsertNextCell(3);
-        out_triangles->InsertCellPoint(triangle[0]);
-        out_triangles->InsertCellPoint(triangle[1]);
-        out_triangles->InsertCellPoint(triangle[2]);
-    }
-    vtkNew<vtkPolyData> out;
-    out->SetPoints(out_points);
-    out->SetPolys(out_triangles);
-    return out;
-}
-
 ///
 navigatable_mesh::navigatable_mesh(mesh m) : mesh{std::move(m)}
 {
@@ -296,5 +273,7 @@ halfedge_id navigatable_mesh::next_around_triangle(halfedge_id e) const
 halfedge_id navigatable_mesh::next_around_point(halfedge_id e) const
 {
     assert(e >= 0 && e < halfedges.size());
+    std::cout << halfedges.size() << "\n";
+    std::cout << (e / 3 * 3) + (e % 3 + 2) % 3 << "\n";
     return halfedges[(e / 3 * 3) + (e % 3 + 2) % 3].opposite;
 }

@@ -30,53 +30,47 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************<GINKGO LICENSE>*******************************/
 
+//
+// Created by heisenberg on 10.08.21.
+//
+
 #pragma once
 
-#include <vtkPolyData.h>
-#include <array>
-#include <ginkgo/ginkgo.hpp>
-#include <istream>
-#include <vector>
+using mtx = gko::matrix::Csr<>;
+using dense_mtx = gko::matrix::Dense<>;
 
-using point_id = int;
-using halfedge_id = int;
-using edge_id = int;
-using triangle_id = int;
+/// Debugging funtions
+inline void print_mat(std::shared_ptr<dense_mtx> &mat)
+{
+    std::cout << "\n";
+    for (int i = 0; i < mat->get_size()[0]; ++i) {
+        for (int j = 0; j < mat->get_size()[1]; ++j) {
+            std::cout << mat->at(i, j) << " ";
+        }
+        std::cout << "\n";
+    }
+}
+inline void print_mat(std::unique_ptr<dense_mtx> &mat)
+{
+    std::cout << "\n";
+    for (int i = 0; i < mat->get_size()[0]; ++i) {
+        for (int j = 0; j < mat->get_size()[1]; ++j) {
+            std::cout << mat->at(i, j) << " ";
+        }
+        std::cout << "\n";
+    }
+}
 
-struct halfedge {
-    halfedge(point_id start, point_id end)
-        : start{start}, end{end}, opposite{-1}, edge{-1}
-    {}
-
-    point_id start;
-    point_id end;
-    halfedge_id opposite;
-    edge_id edge;
-};
-
-struct mesh {
-    std::vector<std::array<double, 3>> points;
-    std::vector<std::array<point_id, 3>> triangles;
-
-    vtkNew<vtkPolyData> to_vtk() const;
-};
-
-mesh parse_obj(std::istream &stream);
-double tri_area(const std::array<point_id, 3> &tri, const mesh &m);
-
-
-struct navigatable_mesh : mesh {
-    navigatable_mesh(mesh m);
-    std::vector<halfedge> halfedges;
-    std::vector<halfedge_id> point_to_halfedge;
-    std::vector<halfedge_id> edge_to_halfedge;
-
-    triangle_id halfedge_to_triangle(halfedge_id e) const;
-    halfedge_id triangle_to_halfedge(triangle_id e) const;
-    halfedge_id next_around_triangle(halfedge_id e) const;
-    halfedge_id next_around_point(halfedge_id e) const;
-};
-
-void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
-                   std::unique_ptr<gko::matrix::Dense<double>> &tri_2D,
-                   double &area, const std::shared_ptr<gko::Executor> &exec);
+inline void print_mat(std::shared_ptr<mtx> &mat,
+                      const std::shared_ptr<gko::OmpExecutor> &exec)
+{
+    auto dense_mat = gko::share(dense_mtx::create(exec));
+    mat->convert_to(dense_mat.get());
+    std::cout << "\n";
+    for (int i = 0; i < dense_mat->get_size()[0]; ++i) {
+        for (int j = 0; j < dense_mat->get_size()[1]; ++j) {
+            std::cout << dense_mat->at(i, j) << " ";
+        }
+        std::cout << "\n";
+    }
+}

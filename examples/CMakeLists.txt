@@ -15,7 +15,8 @@ set(EXAMPLES_EXEC_LIST
     poisson-solver
     preconditioned-solver
     simple-solver
-    three-pt-stencil-solver)
+    three-pt-stencil-solver
+        fem-reaction-diffusion-equation-plain-cuda)
 
 set(EXAMPLES_LIST
     ${EXAMPLES_EXEC_LIST}
