@@ -33,25 +33,72 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <ginkgo/ginkgo.hpp>
 
 #include <algorithm>
-#include <fstream>
+#include <cmath>
 #include <random>
 #include <string>
 
-#include "mesh.hpp"
+#include <vtkActor.h>
+#include <vtkCamera.h>
+#include <vtkDataSetAttributes.h>
+#include <vtkNamedColors.h>
+#include <vtkNew.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkProgrammableFilter.h>
+#include <vtkProperty.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
 
-//#ifndef GKO_EXEC
-//#define GKO_EXEC 1
-//#endif
+#include "helper.hpp"
+#include "mesh.hpp"
 
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
-#if GKO_EXEC == 1
-using executor = gko::CudaExecutor;
-#elif GKO_EXEC == 2
-using executor = gko::OmpExecutor;
-#elif GKO_EXEC == 3
 using executor = gko::ReferenceExecutor;
-#endif  // GKO_EXEC
+
+class timer : public vtkCommand {
+public:
+    timer(double tau, vtkProgrammableFilter *filter,
+          vtkRenderWindowInteractor *interactor)
+        : filter{filter}, interactor{interactor}
+    {
+        interactor->AddObserver(vtkCommand::TimerEvent, this);
+        interactor->CreateRepeatingTimer(
+            static_cast<unsigned long>(tau * 1000));
+    }
+
+    virtual void Execute(vtkObject *caller, unsigned long event_id, void *)
+    {
+        if (vtkCommand::TimerEvent == event_id) {
+            filter->Modified();
+            interactor->Render();
+        }
+    }
+
+private:
+    vtkProgrammableFilter *filter;
+    vtkRenderWindowInteractor *interactor;
+};
+
+
+struct animation_state {
+    vtkProgrammableFilter *filter;
+    vtkDataArray *data;
+    mesh *m;
+    double time;
+    double tau;
+    double f;
+    double k;
+    std::shared_ptr<dense_mtx> u1;
+    std::shared_ptr<dense_mtx> v1;
+    std::shared_ptr<dense_mtx> u2;
+    std::shared_ptr<dense_mtx> v2;
+    std::shared_ptr<mtx> MminusA_u;
+    std::shared_ptr<mtx> MminusA_v;
+    std::unique_ptr<gko::solver::Cg<>> solver_M;
+    std::shared_ptr<executor> exec;
+};
+
 
 void generate_MA(const navigatable_mesh &m,
                  gko::matrix_assembly_data<double, int> &M,
@@ -72,6 +119,7 @@ void generate_MA(const navigatable_mesh &m,
     for (auto tri : m.triangles) {
         // map triangle to 2D plane and calc area
         tri_map_3D_2D(tri, m, tri_2D, tri_area, exec);
+
         // calc local stiffness matrix A = tri_2D'*tri_2D/(4*tri_area)
         auto trans_tri_2D = tri_2D->transpose();
         trans_tri_2D->apply(gko::lend(tri_2D), gko::lend(local_A));
@@ -114,7 +162,6 @@ inline void init_from_seed_edge(const halfedge_id seed_edge,
         // descend to required depth
         halfedge_id level2_seed_edge = m.halfedges.at(level1_edge).opposite;
         halfedge_id level2_edge = m.next_around_point(level2_seed_edge);
-
         while (level2_edge != level2_seed_edge) {
             set_init_val(m, level2_edge, init_v_data);
             level2_edge = m.next_around_point(level2_edge);
@@ -132,7 +179,7 @@ void init_uv(gko::matrix_data<> &init_u_data, gko::matrix_data<> &init_v_data,
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist(
         0, m.halfedges.size() / 2 - 1);
-    std::vector<int> seed_edges;
+    std::vector<u_int> seed_edges;
     seed_edges.reserve(num_seeds);
     for (int i = 0; i < num_seeds; ++i) {
         seed_edges.emplace_back(dist(rng));
@@ -249,12 +296,9 @@ void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
         gko::as<dense_mtx>(du->transpose())->compute_norm2(norm_du.get());
         gko::as<dense_mtx>(dv->transpose())->compute_norm2(norm_dv.get());
 
-        //        std::cout << "Netwon iteration: " << iter;
-        //        print_mat(norm_dv);
+        std::cout << "Netwon iteration: " << iter;
         ++iter;
-#if GKO_EXEC == 1
-        exec->synchronize();
-#endif
+        print_mat(norm_dv);
         if (norm_du->at(0, 0) + norm_dv->at(0, 0) < 1e-6) break;
     }
     u->copy_from(gko::as<dense_mtx>(u1->transpose()));
@@ -275,61 +319,94 @@ void nonlin_update(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
     }
 }
 
+void animate(void *data)
+{
+    auto state = static_cast<animation_state *>(data);
+    std::cout << state->time << std::endl;
+    state->time += state->tau;
+    // Simulation step
+    auto start_time = std::chrono::steady_clock::now();
+    state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
+    state->solver_M->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
+    state->solver_M->apply(gko::lend(state->v2), gko::lend(state->v1));
+
+    // update nonlinear term
+    //    newton(state->u1, state->v1, state->f, state->k, state->tau,
+    //    state->exec);
+    nonlin_update(state->u1, state->v1, state->f, state->k, state->tau);
+    auto stop_time = std::chrono::steady_clock::now();
+    auto runtime = static_cast<double>(
+                       std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           stop_time - start_time)
+                           .count()) *
+                   1e-6;
+    std::cout << "Runtime (ms): " << runtime << "\n";
+
+    for (int i = 0; i < state->m->points.size(); i++) {
+        state->data->SetTuple1(i, state->v1->at(i, 0));
+    }
+    state->filter->GetPolyDataOutput()->CopyStructure(
+        state->filter->GetPolyDataInput());
+    auto point_data =
+        state->filter->GetPolyDataOutput()->GetAttributes(vtkPolyData::POINT);
+    point_data->SetScalars(state->data);
+}
+
+
 int main()
-{  /// Construct mesh from obj file
+{
+    /// Construct mesh from obj file
+    vtkNew<vtkNamedColors> colors;
     std::ifstream stream{
-        "/home/kit/stud/ubxin/ginkgo_personal_dev/examples/"
-        "fem-reaction-diffusion-equation-plain-cuda/data/sphere6.obj"};
+        "../../../examples/fem-reaction-diffusion-equation/data/sphere6.obj"};
     auto init_m = parse_obj(stream);
     auto m = navigatable_mesh(init_m);
+    auto poly_data = init_m.to_vtk();
 
     /// Define parameters
     // these parameters produced sensible results for dragon
-    auto Du = 0.00125;
-    auto Dv = 0.000625;
+    //    auto Du = 0.02;
+    //    auto Dv = 0.01;
+    //    auto f = 0.055;
+    //    auto k = 0.062;
+
+    //    auto Du = 0.01;
+    //    auto Dv = 0.006;
+    //    auto f = .018;
+    //    auto k = .051;
+    //    auto steps_per_sec = 4;
+    // for torus
+    //    auto Du = 0.05;
+    //    auto Dv = 0.025;
+    //    // feed and kill rates
+    //    auto f = 0.052;
+    //    auto k = 0.068;
+    // diffusion factors
+    auto Du = 0.01;
+    auto Dv = 0.005;
     // feed and kill rates
     auto f = 0.038;
     auto k = 0.061;
     // number of simulation steps per second
     auto steps_per_sec = 4;
-    // diffusion factors
-    //    auto Du = 0.01;
-    //    auto Dv = 0.005;
-    //    // feed and kill rates
-    //    auto f = 0.038;
-    //    auto k = 0.061;
-    //    // number of simulation steps per second
-    //    auto steps_per_sec = 10;
     // time step size for the simulation
     auto tau = 1.0 / steps_per_sec;
-    int t0 = tau * 101;
     /// Construct mass (M) and stiffness (A) matrices
     // actually use these to construct the matrices needed for implicit step
-
-#if GKO_EXEC == 1
-    auto exec = executor::create(0, gko::OmpExecutor::create(), true,
-                                 gko::allocation_mode::unified_global);
-#elif GKO_EXEC == 2 || GKO_EXEC == 3
     auto exec = executor::create();
-#endif  // GKO_EXEC
-
     auto nelems = m.points.size();
     auto M_data =
         gko::matrix_assembly_data<double, int>(gko::dim<2>(nelems, nelems));
     auto A_data =
         gko::matrix_assembly_data<double, int>(gko::dim<2>(nelems, nelems));
 
-
     generate_MA(m, M_data, A_data, exec);
-
-    std::cout << "M and A gen done\n";
 
     auto M = gko::share(mtx::create(exec));
     M->read(M_data);
     auto A = gko::share(mtx::create(exec));
     A->read(A_data);
-    std::cout << "M and A init done\n";
-
 
     // write M and A to file
     //    std::ofstream
@@ -341,38 +418,24 @@ int main()
     //    return 0;
 
 
-    /// Construct matrices for Crank-Nicolson
+    /// Construct matrices for explicit Euler
     // nxn unit matrix
     auto ones = gko::share(mtx::create(exec));
     auto ones_data = gko::matrix_data<>::diag(gko::dim<2>(nelems, nelems), 1.0);
     ones->read(ones_data);
     auto beta = gko::initialize<dense_mtx>({1}, exec);
 
-    // M + (tau/2)*Du*A
-    auto alpha = gko::initialize<dense_mtx>({tau * Du / 2}, exec);
-    auto MplusA_u = gko::share(gko::clone(exec, M));
-    A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
-             gko::lend(MplusA_u));
-
-    // M - (tau/2)*Du*A
-    alpha->at(0, 0) = -tau * Du / 2;
+    // M - (tau/4)*Du*A
+    auto alpha = gko::initialize<dense_mtx>({-tau * Du}, exec);
     auto MminusA_u = gko::share(gko::clone(exec, M));
     A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
              gko::lend(MminusA_u));
 
-    // M + (tau/2)*Dv*A
-    alpha->at(0, 0) = tau * Dv / 2;
-    auto MplusA_v = gko::share(gko::clone(exec, M));
-    A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
-             gko::lend(MplusA_v));
-
-    // M - (tau/2)*Dv*A
-    alpha->at(0, 0) = -tau * Dv / 2;
+    // M - (tau/4)*Dv*A
+    alpha->at(0, 0) = -tau * Dv;
     auto MminusA_v = gko::share(gko::clone(exec, M));
     A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
              gko::lend(MminusA_v));
-
-    std::cout << "CN matrix init done\n";
 
     /// Set initial conditions
     gko::matrix_data<> init_u_data{gko::dim<2>(m.points.size(), 1)};
@@ -388,8 +451,6 @@ int main()
         alpha.get(), exec, gko::dim<2>(nelems, 1)));
     u1->read(init_u_data);
     v1->read(init_v_data);
-    std::cout << "Init conds init done\n";
-
 
     /// Generate solver
     // use Ic, Jacobi or GeneralIsai
@@ -402,48 +463,57 @@ int main()
                                .on(exec))
             .on(exec);
 
-    auto solver_u = solver_gen->generate(MplusA_u);
-    auto solver_v = solver_gen->generate(MplusA_v);
-    std::cout << "Solver init done\n";
+    auto solver_M = solver_gen->generate(M);
+    vtkNew<vtkProgrammableFilter> filter;
 
-    // CSV file for recording
-    std::ofstream csv_out("./time_data.csv");
-    csv_out << "cn,nonlin\n";
+    animation_state state{filter,
+                          vtkDataArray::CreateDataArray(VTK_DOUBLE),
+                          &init_m,
+                          0.0,
+                          tau,
+                          f,
+                          k,
+                          std::move(u1),
+                          std::move(v1),
+                          std::move(u2),
+                          std::move(v2),
+                          std::move(MminusA_u),
+                          std::move(MminusA_v),
+                          std::move(solver_M),
+                          std::move(exec)};
+    state.data->SetNumberOfComponents(1);
+    state.data->SetNumberOfTuples(init_m.points.size());
+    filter->SetInputData(poly_data);
+    filter->SetExecuteMethod(animate, &state);
 
+    vtkNew<vtkPolyDataMapper> mapper;
+    mapper->SetInputConnection(filter->GetOutputPort());
+    vtkNew<vtkActor> actor;
+    actor->SetMapper(mapper);
+    actor->GetProperty()->SetColor(colors->GetColor3d("Silver").GetData());
 
-    /// Iterate
-    for (double t = 0; t < t0; t += tau) {
-        // Crank-Nicolson step for both equations
-        // M*(u-u_old)/tau + (Du/4)*A*(u+u_old)
-        auto start_cn = std::chrono::steady_clock::now();
-        MminusA_u->apply(gko::lend(u1), gko::lend(u2));
-        solver_u->apply(gko::lend(u2), gko::lend(u1));
-        MminusA_v->apply(gko::lend(v1), gko::lend(v2));
-        solver_v->apply(gko::lend(v2), gko::lend(v1));
-        auto stop_cn = std::chrono::steady_clock::now();
-        auto start_nonlin = std::chrono::steady_clock::now();
+    vtkNew<vtkRenderer> renderer;
+    renderer->AddActor(actor);
+    renderer->SetBackground(colors->GetColor3d("White").GetData());
+    renderer->ResetCamera();
+    renderer->GetActiveCamera()->Azimuth(30);
+    renderer->GetActiveCamera()->Elevation(30);
+    renderer->GetActiveCamera()->Dolly(1.5);
+    renderer->ResetCameraClippingRange();
 
-        // Newton or simple update for nonlinear term
-        newton(u1, v1, f, k, tau, exec);
-        //        nonlin_update(u1, v1, f, k, tau);
+    vtkNew<vtkRenderWindow> renderWindow;
+    renderWindow->AddRenderer(renderer);
+    renderWindow->SetWindowName("objview");
 
-        auto stop_nonlin = std::chrono::steady_clock::now();
-        auto runtime_cn =
-            static_cast<double>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(stop_cn -
-                                                                     start_cn)
-                    .count()) *
-            1e-6;
-        auto runtime_nonlin =
-            static_cast<double>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    stop_nonlin - start_nonlin)
-                    .count()) *
-            1e-6;
-        std::cout << "Runtime cn (ms): " << runtime_cn
-                  << "  runtime nonlin (ms): " << runtime_nonlin << "\n";
-        csv_out << runtime_cn << "," << runtime_nonlin << "\n";
-    }
-    /// Clean up
-    csv_out.close();
+    vtkNew<vtkRenderWindowInteractor> renderWindowInteractor;
+    renderWindowInteractor->SetRenderWindow(renderWindow);
+
+    renderWindowInteractor->Initialize();
+
+    timer t{state.tau, filter, renderWindowInteractor};
+
+    renderWindow->SetSize(1024, 768);
+    renderWindow->Render();
+
+    renderWindowInteractor->Start();
 }

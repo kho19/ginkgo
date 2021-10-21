@@ -54,7 +54,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
-using executor = gko::ReferenceExecutor;
+using executor = gko::OmpExecutor;
 
 class timer : public vtkCommand {
 public:
@@ -104,7 +104,7 @@ struct animation_state {
 void generate_MA(const navigatable_mesh &m,
                  gko::matrix_assembly_data<double, int> &M,
                  gko::matrix_assembly_data<double, int> &A,
-                 const std::shared_ptr<gko::OmpExecutor> &exec)
+                 const std::shared_ptr<executor> &exec)
 {
     /* special helper matrix
      * |x2-x1, x0-x2, x1-x0|
@@ -199,12 +199,12 @@ void init_uv(gko::matrix_data<> &init_u_data, gko::matrix_data<> &init_v_data,
 
 void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
             double f, double k, double tau,
-            const std::shared_ptr<gko::OmpExecutor> &exec)
+            const std::shared_ptr<executor> &exec)
 {
     /*
      * Solve du/dt = F with F nonlinear u = [u,v] :P
-     * u_n+1 = u_n + tau*F(u_n)
-     * def G = u_n + tau*F(u_n) - u_n+1 and solve G = 0
+     * u_n+1 = u_n + tau*F(u_n+1)
+     * def G = u_n + tau*F(u_n+1) - u_n+1 and solve G = 0
      * Iterate u = u-delta_u
      * delta_u = (grad(G))^-1*G
      *
@@ -237,18 +237,6 @@ void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
     auto dets = gko::share(dense_mtx::create_with_type_of(
         alpha_one.get(), exec, gko::dim<2>(1, nelems)));
 
-    for (int i = 0; i < nelems; ++i) {
-        tauF1->at(0, i) =
-            tau * (-u0->at(0, i) * (v0->at(0, i) * v0->at(0, i) + f) + f);
-        tauF2->at(0, i) =
-            tau * (v0->at(0, i) * (u0->at(0, i) * v0->at(0, i) - (f + k)));
-        dG1du->at(0, i) = -tau * (v0->at(0, i) * v0->at(0, i) + f) - 1;
-        dG1dv->at(0, i) = -tau * 2 * u0->at(0, i) * v0->at(0, i);
-        dG2du->at(0, i) = tau * v0->at(0, i) * v0->at(0, i);
-        dG2dv->at(0, i) = tau * (2 * u0->at(0, i) * v0->at(0, i) - (f + k)) - 1;
-        dets->at(0, i) = (dG1du->at(0, i) * dG2dv->at(0, i) -
-                          dG1dv->at(0, i) * dG2du->at(0, i));
-    }
 
     // declare vectors that are updated every iteration
     auto G1 = gko::share(dense_mtx::create_with_type_of(
@@ -264,10 +252,26 @@ void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
     auto dv = gko::share(dense_mtx::create_with_type_of(
         alpha_one.get(), exec, gko::dim<2>(1, nelems)));
 
+    // initial guess for Newton
     u1->copy_from(gko::lend(u0));
     v1->copy_from(gko::lend(v0));
     int iter = 0;
     while (true) {
+        // update F(x) and F'(x)
+        // might be better to use ginkgo scale and add operations instead?
+        for (int i = 0; i < nelems; ++i) {
+            tauF1->at(0, i) =
+                tau * (-u1->at(0, i) * (v1->at(0, i) * v1->at(0, i) + f) + f);
+            tauF2->at(0, i) =
+                tau * (v1->at(0, i) * (u1->at(0, i) * v1->at(0, i) - (f + k)));
+            dG1du->at(0, i) = -tau * (v1->at(0, i) * v1->at(0, i) + f) - 1;
+            dG1dv->at(0, i) = -tau * 2 * u1->at(0, i) * v1->at(0, i);
+            dG2du->at(0, i) = tau * v1->at(0, i) * v1->at(0, i);
+            dG2dv->at(0, i) =
+                tau * (2 * u1->at(0, i) * v1->at(0, i) - (f + k)) - 1;
+            dets->at(0, i) = (dG1du->at(0, i) * dG2dv->at(0, i) -
+                              dG1dv->at(0, i) * dG2du->at(0, i));
+        }
         G1->copy_from(gko::lend(u0));
         G1->sub_scaled(gko::lend(alpha_one), gko::lend(u1));
         G1->add_scaled(gko::lend(alpha_one), gko::lend(tauF1));
@@ -302,6 +306,19 @@ void newton(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
     v->copy_from(gko::as<dense_mtx>(v1->transpose()));
 }
 
+void nonlin_update(std::shared_ptr<dense_mtx> &u, std::shared_ptr<dense_mtx> &v,
+                   double f, double k, double tau)
+{
+    auto nelems = u->get_num_stored_elements();
+    for (int i = 0; i < nelems; ++i) {
+        u->at(i, 0) =
+            u->at(i, 0) +
+            tau * (-u->at(i, 0) * (v->at(i, 0) * v->at(i, 0) + f) + f);
+        v->at(i, 0) =
+            v->at(i, 0) +
+            tau * (v->at(i, 0) * (u->at(i, 0) * v->at(i, 0) - (f + k)));
+    }
+}
 
 void animate(void *data)
 {
@@ -316,9 +333,9 @@ void animate(void *data)
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
     state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
 
-    // Newton for nonlinear term
+    // update nonlinear term
     newton(state->u1, state->v1, state->f, state->k, state->tau, state->exec);
-
+    //    nonlin_update(state->u1, state->v1, state->f, state->k, state->tau);
     // Remaining Crank-Nicolson half step
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
     state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
@@ -348,7 +365,7 @@ int main()
     /// Construct mesh from obj file
     vtkNew<vtkNamedColors> colors;
     std::ifstream stream{
-        "../../../examples/fem-reaction-diffusion-equation/data/dragon.obj"};
+        "../../../examples/fem-reaction-diffusion-equation/data/sphere6.obj"};
     auto init_m = parse_obj(stream);
     auto m = navigatable_mesh(init_m);
     auto poly_data = init_m.to_vtk();
@@ -365,15 +382,10 @@ int main()
     //    auto f = .018;
     //    auto k = .051;
     //    auto steps_per_sec = 4;
-    // for torus
-    //    auto Du = 0.05;
-    //    auto Dv = 0.025;
-    //    // feed and kill rates
-    //    auto f = 0.052;
-    //    auto k = 0.068;
+
     // diffusion factors
-    auto Du = 0.01;
-    auto Dv = 0.005;
+    auto Du = 0.0025;
+    auto Dv = 0.00125;
     // feed and kill rates
     auto f = 0.038;
     auto k = 0.061;
@@ -450,6 +462,7 @@ int main()
         alpha.get(), exec, gko::dim<2>(nelems, 1)));
     auto v2 = gko::share(dense_mtx::create_with_type_of(
         alpha.get(), exec, gko::dim<2>(nelems, 1)));
+    // u1, v1 always contain the current data between update steps
     u1->read(init_u_data);
     v1->read(init_v_data);
 

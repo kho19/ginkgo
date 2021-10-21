@@ -37,6 +37,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <map>
 #include <string>
 
+//#ifndef GKO_EXEC
+//#define GKO_EXEC 1
+//#endif
+
+#if GKO_EXEC == 1
+using executor = gko::CudaExecutor;
+#elif GKO_EXEC == 2
+using executor = gko::OmpExecutor;
+#elif GKO_EXEC == 3
+using executor = gko::ReferenceExecutor;
+#endif  // GKO_EXEC
+
 mesh parse_obj(std::istream &stream)
 {
     mesh result;
@@ -93,7 +105,7 @@ double tri_area(const std::array<point_id, 3> &tri, const mesh &m)
 
 void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
                    std::unique_ptr<gko::matrix::Dense<double>> &tri_2D,
-                   double &area, const std::shared_ptr<gko::Executor> &exec)
+                   double &area, const std::shared_ptr<executor> &exec)
 {
     std::vector<double> temp1;
     temp1.reserve(3);
@@ -144,6 +156,9 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
 
     // check that normal vector doesn't already (almost) point in z direction
     // TODO: is 10*min a good value?
+#if GKO_EXEC == 1
+    exec->synchronize();
+#endif
     if (std::hypot(normal->at(0), normal->at(1)) <
         std::numeric_limits<double>::min() * 10) {
         G = gko::initialize<gko::matrix::Dense<>>(
@@ -167,12 +182,16 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
             {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}}, exec);
         auto temp_normal =
             gko::initialize<gko::matrix::Dense<>>({0.0, 0.0, 0.0}, exec);
+
         G1->apply(gko::lend(normal), gko::lend(temp_normal));
 
         // givens rotation y -> 0
         sign = std::signbit(normal->at(1)) == std::signbit(normal->at(2))
                    ? 1.0
                    : -1.0;
+#if GKO_EXEC == 1
+        exec->synchronize();
+#endif
         r = std::hypot(temp_normal->at(1), temp_normal->at(2));
         c = std::abs(temp_normal->at(2)) / r;
         s = sign * std::abs(temp_normal->at(1)) / r;
@@ -209,7 +228,6 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
     }
 }
 
-///
 navigatable_mesh::navigatable_mesh(mesh m) : mesh{std::move(m)}
 {
     halfedges.reserve(triangles.size() * 3);
@@ -273,7 +291,5 @@ halfedge_id navigatable_mesh::next_around_triangle(halfedge_id e) const
 halfedge_id navigatable_mesh::next_around_point(halfedge_id e) const
 {
     assert(e >= 0 && e < halfedges.size());
-    std::cout << halfedges.size() << "\n";
-    std::cout << (e / 3 * 3) + (e % 3 + 2) % 3 << "\n";
     return halfedges[(e / 3 * 3) + (e % 3 + 2) % 3].opposite;
 }

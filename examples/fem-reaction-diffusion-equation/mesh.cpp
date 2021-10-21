@@ -37,6 +37,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <map>
 #include <string>
 
+
 mesh parse_obj(std::istream &stream)
 {
     mesh result;
@@ -198,6 +199,9 @@ void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
     }
     // apply givens rotation reusing G2
     G->apply(gko::lend(G1), gko::lend(G2));
+    // TODO: could do this without givens rotation? Just subtract z values as
+    // well?
+
     /* construct special matrix
      * |x2-x1, x0-x2, x1-x0|
      * |y2-y1, y0-y2, y1-y0|
