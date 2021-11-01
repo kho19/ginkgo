@@ -30,6 +30,8 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************<GINKGO LICENSE>*******************************/
 
+// TODO: add description
+
 #include <ginkgo/ginkgo.hpp>
 
 #include <algorithm>
@@ -88,17 +90,18 @@ struct animation_state {
     double tau;
     double f;
     double k;
-    std::shared_ptr<dense_mtx> u1;
-    std::shared_ptr<dense_mtx> v1;
-    std::shared_ptr<dense_mtx> u2;
-    std::shared_ptr<dense_mtx> v2;
-    std::shared_ptr<mtx> MminusA_u;
-    std::shared_ptr<mtx> MminusA_v;
-    std::unique_ptr<gko::solver::Cg<>> solver_M;
+    std::unique_ptr<dense_mtx> u1;
+    std::unique_ptr<dense_mtx> v1;
+    std::unique_ptr<dense_mtx> u2;
+    std::unique_ptr<dense_mtx> v2;
+    std::unique_ptr<mtx> MminusA_u;
+    std::unique_ptr<mtx> MminusA_v;
+    std::unique_ptr<gko::solver::Cg<>> solver_u;
+    std::unique_ptr<gko::solver::Cg<>> solver_v;
     std::shared_ptr<executor> exec;
 };
 
-
+// TODO: add comments explaining what is going on here
 void generate_MA(const navigatable_mesh& m,
                  gko::matrix_assembly_data<double, int>& M,
                  gko::matrix_assembly_data<double, int>& A,
@@ -140,42 +143,17 @@ void generate_MA(const navigatable_mesh& m,
     }
 }
 
-// TODO: make the initialisation nicer. Do not need three functions for this
-// step
-inline void set_init_val(const navigatable_mesh& m, const edge_id edge,
-                         gko::matrix_data<>& init_data)
+// TODO: with smaller seed area patterns to not form anymore.
+//  make seed area larger again to make sure this is the reason.
+//  could consider making seed area much larger if this is the case.
+void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m)
 {
-    for (auto& nonzero : init_data.nonzeros) {
-        if (nonzero.row == m.halfedges.at(edge).end) {
-            nonzero.value = 1.0;
-            break;
-        }
-    }
-}
-
-inline void init_from_seed_edge(const halfedge_id seed_edge,
-                                navigatable_mesh& m,
-                                gko::matrix_data<>& init_v_data)
-{
-    halfedge_id level1_edge = m.next_around_point(seed_edge);
-    // loop until starting point reached
-    while (level1_edge != seed_edge) {
-        // descend to required depth
-        halfedge_id level2_seed_edge = m.halfedges.at(level1_edge).opposite;
-        halfedge_id level2_edge = m.next_around_point(level2_seed_edge);
-        while (level2_edge != level2_seed_edge) {
-            set_init_val(m, level2_edge, init_v_data);
-            level2_edge = m.next_around_point(level2_edge);
-        }
-        set_init_val(m, level1_edge, init_v_data);
-        level1_edge = m.next_around_point(level1_edge);
-    }
-}
-
-void init_uv(gko::matrix_data<>& init_u_data, gko::matrix_data<>& init_v_data,
-             navigatable_mesh& m)
-{
+    auto u_data = u->get_values();
+    auto v_data = v->get_values();
+    auto nelems = u->get_size()[0];
     int num_seeds = 2;
+    // TODO: maybe remove random seed initilisation. Just put at 0.25 and 0.5 of
+    // way through points
     std::random_device dev;
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist(
@@ -186,19 +164,24 @@ void init_uv(gko::matrix_data<>& init_u_data, gko::matrix_data<>& init_v_data,
         seed_edges.emplace_back(dist(rng));
     }
     // populate initial conditions
-    for (int i = 0; i < init_u_data.size[0]; ++i) {
+    for (int i = 0; i < nelems; ++i) {
         // init u to 1.0 everywhere
-        init_u_data.nonzeros.emplace_back(i, 0, 1.0);
+        u_data[i] = 1.0;
         // init v to 0.0 everywhere
-        init_v_data.nonzeros.emplace_back(i, 0, 0.0);
+        v_data[i] = 0.0;
     }
     for (auto seed_edge : seed_edges) {
-        init_from_seed_edge(seed_edge, m, init_v_data);
+        auto next_edge = m.next_around_point(seed_edge);
+        v_data[m.halfedges.at(next_edge).start] = 1.0;
+        while (next_edge != seed_edge) {
+            v_data[m.halfedges.at(next_edge).end] = 1.0;
+            next_edge = m.next_around_point(next_edge);
+        }
     }
 }
 
-void nonlin_update(std::shared_ptr<dense_mtx>& u, std::shared_ptr<dense_mtx>& v,
-                   double f, double k, double tau)
+// explicit local update of the non-linear terms
+void nonlin_update(dense_mtx* u, dense_mtx* v, double f, double k, double tau)
 {
     auto nelems = u->get_num_stored_elements();
     for (int i = 0; i < nelems; ++i) {
@@ -217,26 +200,24 @@ void animate(void* data)
     std::cout << state->time << std::endl;
     state->time += state->tau;
     // Simulation step
-    auto start_time = std::chrono::steady_clock::now();
     // Update diffusion term (half step: strang splitting)
+    // TODO: better way to solve the systems? pack both into one large matrix
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
-    state->solver_M->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
-    state->solver_M->apply(gko::lend(state->v2), gko::lend(state->v1));
-    // Update nonlinear term
-    nonlin_update(state->u1, state->v1, state->f, state->k, state->tau);
+    state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
+
+    // update nonlinear term
+    // newton(state->u1, state->v1, state->f, state->k, state->tau,
+    // state->exec);
+    nonlin_update(gko::lend(state->u1), gko::lend(state->v1), state->f,
+                  state->k, state->tau);
     // Update diffusion term
     state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
-    state->solver_M->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
-    state->solver_M->apply(gko::lend(state->v2), gko::lend(state->v1));
-    auto stop_time = std::chrono::steady_clock::now();
-    auto runtime = static_cast<double>(
-                       std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           stop_time - start_time)
-                           .count()) *
-                   1e-6;
-    std::cout << "Runtime (ms): " << runtime << "\n";
+    state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
+    std::cout << "Global time ";
 
     for (int i = 0; i < state->m->points.size(); i++) {
         state->data->SetTuple1(i, state->v1->at(i, 0));
@@ -253,6 +234,8 @@ int main()
 {
     /// Construct mesh from obj file
     vtkNew<vtkNamedColors> colors;
+    // TODO: make input file interactive and add default independently from
+    // build folder location
     std::ifstream stream{
         "../../../examples/fem-reaction-diffusion-equation/data/sphere6.obj"};
     auto init_m = parse_obj(stream);
@@ -261,26 +244,18 @@ int main()
 
     /// Define model parameters
     // diffusion factors
-    //    auto Du = 0.0025;
-    //    auto Dv = 0.00125;
-    //    // feed and kill rates
-    //    auto f = 0.038;
-    //    auto k = 0.061;
-    //    // number of simulation steps per second
-    //    auto steps_per_sec = 10;
-    // TODO: unstable factors for explicit update
-    // diffusion factors
-    auto Du = 0.01;
-    auto Dv = 0.005;
+    auto Du = 0.0025;
+    auto Dv = 0.00125;
     // feed and kill rates
     auto f = 0.038;
     auto k = 0.061;
     // number of simulation steps per second
-    auto steps_per_sec = 30;
+    auto steps_per_sec = 4;
     // time step size for the simulation
     auto tau = 1.0 / steps_per_sec;
 
     /// Construct mass (M) and stiffness (A) matrices
+    // TODO: consider adding interactive exec config like in poisson-solver
     auto exec = executor::create();
     auto nelems = m.points.size();
     auto M_data =
@@ -290,44 +265,50 @@ int main()
 
     generate_MA(m, M_data, A_data, exec);
 
-    auto M = gko::share(mtx::create(exec));
+    auto M = mtx::create(exec);
     M->read(M_data);
-    auto A = gko::share(mtx::create(exec));
+    auto A = mtx::create(exec);
     A->read(A_data);
 
     /// Construct matrices for explicit Euler
     // nxn unit matrix
-    auto ones = gko::share(mtx::create(exec));
     auto ones_data = gko::matrix_data<>::diag(gko::dim<2>(nelems, nelems), 1.0);
+    auto ones = mtx::create(exec, nelems);
     ones->read(ones_data);
     auto beta = gko::initialize<dense_mtx>({1}, exec);
 
+    // M + (tau/4)*Du*A
+    auto alpha = gko::initialize<dense_mtx>({tau * Du / 4}, exec);
+    auto MplusA_u = gko::clone(exec, M);
+    A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
+             gko::lend(MplusA_u));
+
     // M - (tau/4)*Du*A
-    auto alpha = gko::initialize<dense_mtx>({-tau * Du / 4}, exec);
-    auto MminusA_u = gko::share(gko::clone(exec, M));
+    alpha->at(0, 0) = -tau * Du / 4;
+    auto MminusA_u = gko::clone(exec, M);
     A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
              gko::lend(MminusA_u));
 
+    // M + (tau/4)*Dv*A
+    alpha->at(0, 0) = tau * Dv / 4;
+    auto MplusA_v = gko::clone(exec, M);
+    A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
+             gko::lend(MplusA_v));
+
     // M - (tau/4)*Dv*A
     alpha->at(0, 0) = -tau * Dv / 4;
-    auto MminusA_v = gko::share(gko::clone(exec, M));
+    auto MminusA_v = gko::clone(exec, M);
     A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
              gko::lend(MminusA_v));
 
     /// Set initial conditions
-    gko::matrix_data<> init_u_data{gko::dim<2>(m.points.size(), 1)};
-    gko::matrix_data<> init_v_data{gko::dim<2>(m.points.size(), 1)};
-    init_uv(init_u_data, init_v_data, m);
-    auto u1 = gko::share(dense_mtx::create_with_type_of(
-        alpha.get(), exec, gko::dim<2>(nelems, 1)));
-    auto u2 = gko::share(dense_mtx::create_with_type_of(
-        alpha.get(), exec, gko::dim<2>(nelems, 1)));
-    auto v1 = gko::share(dense_mtx::create_with_type_of(
-        alpha.get(), exec, gko::dim<2>(nelems, 1)));
-    auto v2 = gko::share(dense_mtx::create_with_type_of(
-        alpha.get(), exec, gko::dim<2>(nelems, 1)));
-    u1->read(init_u_data);
-    v1->read(init_v_data);
+    // TODO: nicer way of initialising these?
+    auto u1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
+    auto u2 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
+    auto v1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
+    auto v2 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
+    init_uv(gko::lend(u1), gko::lend(v1), m);
+
 
     /// Generate solver
     // use Ic or Jacobi
@@ -340,7 +321,9 @@ int main()
                                .on(exec))
             .on(exec);
 
-    auto solver_M = solver_gen->generate(M);
+    auto solver_u = solver_gen->generate(gko::give(MplusA_u));
+    auto solver_v = solver_gen->generate(gko::give(MplusA_v));
+
     vtkNew<vtkProgrammableFilter> filter;
 
     animation_state state{filter,
@@ -356,7 +339,8 @@ int main()
                           std::move(v2),
                           std::move(MminusA_u),
                           std::move(MminusA_v),
-                          std::move(solver_M),
+                          std::move(solver_u),
+                          std::move(solver_v),
                           std::move(exec)};
     state.data->SetNumberOfComponents(1);
     state.data->SetNumberOfTuples(init_m.points.size());

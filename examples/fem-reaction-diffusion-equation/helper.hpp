@@ -34,13 +34,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Created by heisenberg on 10.08.21.
 //
 
+// TODO: delete helper file when done
+
 #pragma once
 
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
 
 /// Debugging funtions
-inline void print_mat(std::shared_ptr<dense_mtx> &mat)
+inline void print_mat(std::shared_ptr<dense_mtx>& mat)
 {
     std::cout << "\n";
     for (int i = 0; i < mat->get_size()[0]; ++i) {
@@ -50,7 +52,7 @@ inline void print_mat(std::shared_ptr<dense_mtx> &mat)
         std::cout << "\n";
     }
 }
-inline void print_mat(std::unique_ptr<dense_mtx> &mat)
+inline void print_mat(std::unique_ptr<dense_mtx>& mat)
 {
     std::cout << "\n";
     for (int i = 0; i < mat->get_size()[0]; ++i) {
@@ -61,8 +63,8 @@ inline void print_mat(std::unique_ptr<dense_mtx> &mat)
     }
 }
 
-inline void print_mat(std::shared_ptr<mtx> &mat,
-                      const std::shared_ptr<gko::OmpExecutor> &exec)
+inline void print_mat(std::shared_ptr<mtx>& mat,
+                      const std::shared_ptr<gko::OmpExecutor>& exec)
 {
     auto dense_mat = gko::share(dense_mtx::create(exec));
     mat->convert_to(dense_mat.get());

@@ -38,7 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 
 
-mesh parse_obj(std::istream &stream)
+mesh parse_obj(std::istream& stream)
 {
     mesh result;
     std::string line;
@@ -66,7 +66,7 @@ mesh parse_obj(std::istream &stream)
     return result;
 }
 
-double tri_area(const std::array<point_id, 3> &tri, const mesh &m)
+double tri_area(const std::array<point_id, 3>& tri, const mesh& m)
 {
     std::vector<double> temp1;
     temp1.reserve(3);
@@ -92,9 +92,9 @@ double tri_area(const std::array<point_id, 3> &tri, const mesh &m)
     return area;
 }
 
-void tri_map_3D_2D(const std::array<point_id, 3> &tri, const mesh &m,
-                   std::unique_ptr<gko::matrix::Dense<double>> &tri_2D,
-                   double &area, const std::shared_ptr<gko::Executor> &exec)
+void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
+                   std::unique_ptr<gko::matrix::Dense<double>>& tri_2D,
+                   double& area, const std::shared_ptr<gko::Executor>& exec)
 {
     std::vector<double> temp1;
     temp1.reserve(3);
@@ -236,7 +236,6 @@ vtkNew<vtkPolyData> mesh::to_vtk() const
     return out;
 }
 
-///
 navigatable_mesh::navigatable_mesh(mesh m) : mesh{std::move(m)}
 {
     halfedges.reserve(triangles.size() * 3);
@@ -252,7 +251,7 @@ navigatable_mesh::navigatable_mesh(mesh m) : mesh{std::move(m)}
             edge_id e_idx{-1};
             halfedge_id he_idx = halfedges.size();
             halfedges.emplace_back(u, v);
-            auto &he = halfedges.back();
+            auto& he = halfedges.back();
             // returned if edge was not found
             if (it == edge_map.end()) {
                 // add a new edge, link edge -> halfedge
@@ -263,7 +262,7 @@ navigatable_mesh::navigatable_mesh(mesh m) : mesh{std::move(m)}
                 // use existing edge, link halfedge <-> halfedge
                 e_idx = it->second;
                 auto other_he_idx = edge_to_halfedge[e_idx];
-                auto &other_he = halfedges[other_he_idx];
+                auto& other_he = halfedges[other_he_idx];
                 he.opposite = other_he_idx;
                 other_he.opposite = he_idx;
             }
