@@ -52,7 +52,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "helper.hpp"
 #include "mesh.hpp"
-
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
 using executor = gko::ReferenceExecutor;
@@ -143,16 +142,33 @@ void generate_MA(const navigatable_mesh& m,
     }
 }
 
-// TODO: with smaller seed area patterns to not form anymore.
-//  make seed area larger again to make sure this is the reason.
-//  could consider making seed area much larger if this is the case.
-void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m)
+// Recursively set node values to 1 starting at seed edge and descending to
+// specified depth
+void init_uv_recursive(halfedge_id seed_edge, navigatable_mesh& m,
+                       double* v_data, int levels = 3)
+{
+    --levels;
+    auto next_edge = m.next_around_point(seed_edge);
+    while (next_edge != seed_edge) {
+        v_data[m.halfedges.at(next_edge).end] = 1.0;
+        if (levels > 0) {
+            auto next_seed_edge = m.halfedges.at(next_edge).opposite;
+            init_uv_recursive(next_seed_edge, m, v_data, levels);
+        }
+        next_edge = m.next_around_point(next_edge);
+    }
+}
+
+// Initialises the concentrations of the chemicals u and v
+// u is initialised to 1 everwhere
+// v is initialised to 0 everywhere apart from num_seed patches of depth
+// seed_depth which are initialised to 1
+void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m, int num_seeds,
+             int seed_depth)
 {
     auto u_data = u->get_values();
     auto v_data = v->get_values();
     auto nelems = u->get_size()[0];
-    int num_seeds = 2;
-    // TODO: maybe remove random seed initilisation. Just put at 0.25 and 0.5 of
     // way through points
     std::random_device dev;
     std::mt19937 rng(dev());
@@ -170,13 +186,11 @@ void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m)
         // init v to 0.0 everywhere
         v_data[i] = 0.0;
     }
+    // iterate over seed edges setting nodes of branches to 1 recursively
     for (auto seed_edge : seed_edges) {
-        auto next_edge = m.next_around_point(seed_edge);
-        v_data[m.halfedges.at(next_edge).start] = 1.0;
-        while (next_edge != seed_edge) {
-            v_data[m.halfedges.at(next_edge).end] = 1.0;
-            next_edge = m.next_around_point(next_edge);
-        }
+        v_data[m.halfedges.at(seed_edge).start] = 1.0;
+        v_data[m.halfedges.at(seed_edge).end] = 1.0;
+        init_uv_recursive(seed_edge, m, v_data, seed_depth);
     }
 }
 
@@ -197,7 +211,7 @@ void nonlin_update(dense_mtx* u, dense_mtx* v, double f, double k, double tau)
 void animate(void* data)
 {
     auto state = static_cast<animation_state*>(data);
-    std::cout << state->time << std::endl;
+    std::cout << "Global time: " << state->time << std::endl;
     state->time += state->tau;
     // Simulation step
     // Update diffusion term (half step: strang splitting)
@@ -217,7 +231,6 @@ void animate(void* data)
     state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
     state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
     state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
-    std::cout << "Global time ";
 
     for (int i = 0; i < state->m->points.size(); i++) {
         state->data->SetTuple1(i, state->v1->at(i, 0));
@@ -237,7 +250,7 @@ int main()
     // TODO: make input file interactive and add default independently from
     // build folder location
     std::ifstream stream{
-        "../../../examples/fem-reaction-diffusion-equation/data/sphere6.obj"};
+        "../../../examples/fem-reaction-diffusion-equation/data/cube.obj"};
     auto init_m = parse_obj(stream);
     auto m = navigatable_mesh(init_m);
     auto poly_data = init_m.to_vtk();
@@ -254,6 +267,10 @@ int main()
     // time step size for the simulation
     auto tau = 1.0 / steps_per_sec;
 
+    // Set initialisation parameters
+    int num_seeds = 2;
+    int seed_depth = 4;
+
     /// Construct mass (M) and stiffness (A) matrices
     // TODO: consider adding interactive exec config like in poisson-solver
     auto exec = executor::create();
@@ -265,9 +282,9 @@ int main()
 
     generate_MA(m, M_data, A_data, exec);
 
-    auto M = mtx::create(exec);
+    auto M = mtx::create(exec, gko::dim<2>(nelems, nelems));
     M->read(M_data);
-    auto A = mtx::create(exec);
+    auto A = mtx::create(exec, gko::dim<2>(nelems, nelems));
     A->read(A_data);
 
     /// Construct matrices for explicit Euler
@@ -276,6 +293,8 @@ int main()
     auto ones = mtx::create(exec, nelems);
     ones->read(ones_data);
     auto beta = gko::initialize<dense_mtx>({1}, exec);
+
+    // TODO: try tile these matrices into one big matrix
 
     // M + (tau/4)*Du*A
     auto alpha = gko::initialize<dense_mtx>({tau * Du / 4}, exec);
@@ -301,13 +320,42 @@ int main()
     A->apply(gko::lend(alpha), gko::lend(ones), gko::lend(beta),
              gko::lend(MminusA_v));
 
+    /// building huge matrix here
+    auto LHS_data = gko::matrix_assembly_data<double, int>(
+        gko::dim<2>(nelems * 2, nelems * 2));
+    auto MminusA_u_data = MminusA_u->get_const_values();
+    auto MminusA_u_row_ptr = MminusA_u->get_const_row_ptrs();
+    auto MminusA_u_col_idxs = MminusA_u->get_const_col_idxs();
+    auto MminusA_v_data = MminusA_v->get_const_values();
+    auto MminusA_v_row_ptr = MminusA_v->get_const_row_ptrs();
+    auto MminusA_v_col_idxs = MminusA_v->get_const_col_idxs();
+
+    for (int i = 0; i < nelems; ++i) {
+        for (int j = MminusA_u_row_ptr[i]; j < MminusA_u_row_ptr[i + 1]; ++j) {
+            LHS_data.add_value(i, MminusA_u_col_idxs[j], MminusA_u_data[j]);
+        }
+        for (int j = MminusA_v_row_ptr[i]; j < MminusA_v_row_ptr[i + 1]; ++j) {
+            LHS_data.add_value(i + nelems, MminusA_v_col_idxs[j] + nelems,
+                               MminusA_v_data[j]);
+        }
+    }
+
+    auto LHS = mtx::create(exec, gko::dim<2>(nelems, nelems));
+    LHS->read(LHS_data);
+    print_mat(gko::lend(MminusA_u), exec);
+    print_mat(gko::lend(MminusA_v), exec);
+    print_mat(gko::lend(LHS), exec);
+
+    /// keep working on huge matrix here
+
+    return 0;
+
     /// Set initial conditions
-    // TODO: nicer way of initialising these?
     auto u1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
     auto u2 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
     auto v1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
     auto v2 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
-    init_uv(gko::lend(u1), gko::lend(v1), m);
+    init_uv(gko::lend(u1), gko::lend(v1), m, num_seeds, seed_depth);
 
 
     /// Generate solver

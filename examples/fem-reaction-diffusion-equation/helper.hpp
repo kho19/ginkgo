@@ -63,16 +63,16 @@ inline void print_mat(std::unique_ptr<dense_mtx>& mat)
     }
 }
 
-inline void print_mat(std::shared_ptr<mtx>& mat,
-                      const std::shared_ptr<gko::OmpExecutor>& exec)
+inline void print_mat(mtx* mat, const std::shared_ptr<gko::OmpExecutor>& exec)
 {
     auto dense_mat = gko::share(dense_mtx::create(exec));
     mat->convert_to(dense_mat.get());
-    std::cout << "\n";
+    std::cout << "\n****************************************************\n";
     for (int i = 0; i < dense_mat->get_size()[0]; ++i) {
         for (int j = 0; j < dense_mat->get_size()[1]; ++j) {
             std::cout << dense_mat->at(i, j) << " ";
         }
         std::cout << "\n";
     }
+    std::cout << "\n****************************************************\n";
 }
