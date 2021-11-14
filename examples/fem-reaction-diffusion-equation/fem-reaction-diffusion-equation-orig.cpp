@@ -54,7 +54,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "mesh.hpp"
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
-using executor = gko::OmpExecutor;
+using executor = gko::ReferenceExecutor;
 
 class timer : public vtkCommand {
 public:
@@ -89,10 +89,14 @@ struct animation_state {
     double tau;
     double f;
     double k;
-    std::unique_ptr<dense_mtx> x1;
-    std::unique_ptr<dense_mtx> x2;
-    std::unique_ptr<mtx> RHS;
-    std::unique_ptr<gko::solver::Cg<>> solver_x;
+    std::unique_ptr<dense_mtx> u1;
+    std::unique_ptr<dense_mtx> v1;
+    std::unique_ptr<dense_mtx> u2;
+    std::unique_ptr<dense_mtx> v2;
+    std::unique_ptr<mtx> MminusA_u;
+    std::unique_ptr<mtx> MminusA_v;
+    std::unique_ptr<gko::solver::Cg<>> solver_u;
+    std::unique_ptr<gko::solver::Cg<>> solver_v;
     std::shared_ptr<executor> exec;
 };
 
@@ -125,11 +129,6 @@ void generate_MA(const navigatable_mesh& m,
         auto delta_M = tri_area / 12;
 
         // Fill mass matrix (M) and stiffness matrix (A)
-        // TODO: something going wrong here. Matrices have 6 entries per row
-        // initially but 7 after a while. 6 is correct for the simples sphere.
-        // also check how local_A is constructed and at which points elements
-        // from local_A are added to the matrix. This could be in the wrong
-        // order.
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) {
                 A.add_value(tri.at(i), tri.at(j), local_A->at(i, j));
@@ -146,17 +145,17 @@ void generate_MA(const navigatable_mesh& m,
 // Recursively set node values to 1 starting at seed edge and descending to
 // specified depth
 void init_uv_recursive(halfedge_id seed_edge, navigatable_mesh& m,
-                       double* v_data, int levels)
+                       double* v_data, int levels = 3)
 {
     --levels;
-    if (levels > 0) {
-        auto next_edge = m.next_around_point(seed_edge);
-        while (next_edge != seed_edge) {
+    auto next_edge = m.next_around_point(seed_edge);
+    while (next_edge != seed_edge) {
+        v_data[m.halfedges.at(next_edge).end] = 1.0;
+        if (levels > 0) {
             auto next_seed_edge = m.halfedges.at(next_edge).opposite;
             init_uv_recursive(next_seed_edge, m, v_data, levels);
-            v_data[m.halfedges.at(next_edge).end] = 1.0;
-            next_edge = m.next_around_point(next_edge);
         }
+        next_edge = m.next_around_point(next_edge);
     }
 }
 
@@ -196,42 +195,45 @@ void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m, int num_seeds,
 }
 
 // explicit local update of the non-linear terms
-void nonlin_update(dense_mtx* x, double f, double k, double tau)
+void nonlin_update(dense_mtx* u, dense_mtx* v, double f, double k, double tau)
 {
-    auto nelems = x->get_num_stored_elements() / 2;
+    auto nelems = u->get_num_stored_elements();
     for (int i = 0; i < nelems; ++i) {
-        x->at(i, 0) =
-            x->at(i, 0) +
-            tau * (-x->at(i, 0) *
-                       (x->at(nelems + i, 0) * x->at(nelems + i, 0) + f) +
-                   f);
-        x->at(nelems + i, 0) =
-            x->at(nelems + i, 0) +
-            tau * (x->at(nelems + i, 0) *
-                   (x->at(i, 0) * x->at(nelems + i, 0) - (f + k)));
+        u->at(i, 0) =
+            u->at(i, 0) +
+            tau * (-u->at(i, 0) * (v->at(i, 0) * v->at(i, 0) + f) + f);
+        v->at(i, 0) =
+            v->at(i, 0) +
+            tau * (v->at(i, 0) * (u->at(i, 0) * v->at(i, 0) - (f + k)));
     }
 }
 
 void animate(void* data)
 {
     auto state = static_cast<animation_state*>(data);
-    auto nelems = state->x1->get_num_stored_elements() / 2;
     std::cout << "Global time: " << state->time << std::endl;
     state->time += state->tau;
     // Simulation step
     // Update diffusion term (half step: strang splitting)
-    state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
-    state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
+    // TODO: better way to solve the systems? pack both into one large matrix
+    state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
+    state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
+    state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
 
     // update nonlinear term
-    nonlin_update(gko::lend(state->x1), state->f, state->k, state->tau);
+    // newton(state->u1, state->v1, state->f, state->k, state->tau,
+    // state->exec);
+    nonlin_update(gko::lend(state->u1), gko::lend(state->v1), state->f,
+                  state->k, state->tau);
     // Update diffusion term
-    state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
-    state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
-
+    state->MminusA_u->apply(gko::lend(state->u1), gko::lend(state->u2));
+    state->solver_u->apply(gko::lend(state->u2), gko::lend(state->u1));
+    state->MminusA_v->apply(gko::lend(state->v1), gko::lend(state->v2));
+    state->solver_v->apply(gko::lend(state->v2), gko::lend(state->v1));
 
     for (int i = 0; i < state->m->points.size(); i++) {
-        state->data->SetTuple1(i, state->x1->at(nelems + i, 0));
+        state->data->SetTuple1(i, state->v1->at(i, 0));
     }
     state->filter->GetPolyDataOutput()->CopyStructure(
         state->filter->GetPolyDataInput());
@@ -248,7 +250,7 @@ int main()
     // TODO: make input file interactive and add default independently from
     // build folder location
     std::ifstream stream{
-        "../../../examples/fem-reaction-diffusion-equation/data/sphere.obj"};
+        "../../../examples/fem-reaction-diffusion-equation/data/sphere6.obj"};
     auto init_m = parse_obj(stream);
     auto m = navigatable_mesh(init_m);
     auto poly_data = init_m.to_vtk();
@@ -266,8 +268,8 @@ int main()
     auto tau = 1.0 / steps_per_sec;
 
     // Set initialisation parameters
-    int num_seeds = 5;
-    int seed_depth = 5;
+    int num_seeds = 2;
+    int seed_depth = 4;
 
     /// Construct mass (M) and stiffness (A) matrices
     // TODO: consider adding interactive exec config like in poisson-solver
@@ -285,12 +287,14 @@ int main()
     auto A = mtx::create(exec, gko::dim<2>(nelems, nelems));
     A->read(A_data);
 
-    // Construct matrices for explicit Euler
+    /// Construct matrices for explicit Euler
     // nxn unit matrix
     auto ones_data = gko::matrix_data<>::diag(gko::dim<2>(nelems, nelems), 1.0);
     auto ones = mtx::create(exec, nelems);
     ones->read(ones_data);
     auto beta = gko::initialize<dense_mtx>({1}, exec);
+
+    // TODO: try tile these matrices into one big matrix
 
     // M + (tau/4)*Du*A
     auto alpha = gko::initialize<dense_mtx>({tau * Du / 4}, exec);
@@ -319,37 +323,14 @@ int main()
     // combine system matrices for u and v into one large matrix
     // | MminusA_u     0   |
     // |    0    MminusA_v |
-    auto RHS_data = gko::matrix_assembly_data<double, int>(
-        gko::dim<2>(nelems * 2, nelems * 2));
-    auto MA_u_data = MminusA_u->get_values();
-    auto MA_u_row_ptr = MminusA_u->get_const_row_ptrs();
-    auto MA_u_col_idxs = MminusA_u->get_const_col_idxs();
-    auto MA_v_data = MminusA_v->get_values();
-    auto MA_v_row_ptr = MminusA_v->get_const_row_ptrs();
-    auto MA_v_col_idxs = MminusA_v->get_const_col_idxs();
-
-    for (int i = 0; i < nelems; ++i) {
-        for (int j = MA_u_row_ptr[i]; j < MA_u_row_ptr[i + 1]; ++j) {
-            RHS_data.add_value(i, MA_u_col_idxs[j], MA_u_data[j]);
-        }
-        for (int j = MA_v_row_ptr[i]; j < MA_v_row_ptr[i + 1]; ++j) {
-            RHS_data.add_value(i + nelems, MA_v_col_idxs[j] + nelems,
-                               MA_v_data[j]);
-        }
-    }
-    auto RHS = mtx::create(exec, gko::dim<2>(2 * nelems, 2 * nelems));
-    RHS->read(RHS_data);
-
-    // | MplusA_u     0   |
-    // |    0    MplusA_v |
     auto LHS_data = gko::matrix_assembly_data<double, int>(
         gko::dim<2>(nelems * 2, nelems * 2));
-    MA_u_data = MplusA_u->get_values();
-    MA_u_row_ptr = MplusA_u->get_const_row_ptrs();
-    MA_u_col_idxs = MplusA_u->get_const_col_idxs();
-    MA_v_data = MplusA_v->get_values();
-    MA_v_row_ptr = MplusA_v->get_const_row_ptrs();
-    MA_v_col_idxs = MplusA_v->get_const_col_idxs();
+    auto MA_u_data = MminusA_u->get_const_values();
+    auto MA_u_row_ptr = MminusA_u->get_const_row_ptrs();
+    auto MA_u_col_idxs = MminusA_u->get_const_col_idxs();
+    auto MA_v_data = MminusA_v->get_const_values();
+    auto MA_v_row_ptr = MminusA_v->get_const_row_ptrs();
+    auto MA_v_col_idxs = MminusA_v->get_const_col_idxs();
 
     for (int i = 0; i < nelems; ++i) {
         for (int j = MA_u_row_ptr[i]; j < MA_u_row_ptr[i + 1]; ++j) {
@@ -363,9 +344,30 @@ int main()
     auto LHS = mtx::create(exec, gko::dim<2>(2 * nelems, 2 * nelems));
     LHS->read(LHS_data);
 
-    print_mat(gko::lend(M), exec);
-    print_mat(gko::lend(A), exec);
-    // Set initial conditions
+    // | MplusA_u     0   |
+    // |    0    MplusA_v |
+    auto RHS_data = gko::matrix_assembly_data<double, int>(
+        gko::dim<2>(nelems * 2, nelems * 2));
+    MA_u_data = MplusA_u->get_const_values();
+    MA_u_row_ptr = MplusA_u->get_const_row_ptrs();
+    MA_u_col_idxs = MplusA_u->get_const_col_idxs();
+    MA_v_data = MplusA_v->get_const_values();
+    MA_v_row_ptr = MplusA_v->get_const_row_ptrs();
+    MA_v_col_idxs = MplusA_v->get_const_col_idxs();
+
+    for (int i = 0; i < nelems; ++i) {
+        for (int j = MA_u_row_ptr[i]; j < MA_u_row_ptr[i + 1]; ++j) {
+            RHS_data.add_value(i, MA_u_col_idxs[j], MA_u_data[j]);
+        }
+        for (int j = MA_v_row_ptr[i]; j < MA_v_row_ptr[i + 1]; ++j) {
+            RHS_data.add_value(i + nelems, MA_v_col_idxs[j] + nelems,
+                               MA_v_data[j]);
+        }
+    }
+    auto RHS = mtx::create(exec, gko::dim<2>(2 * nelems, 2 * nelems));
+    RHS->read(RHS_data);
+
+    /// Set initial conditions
     auto u1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
     auto v1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
     auto x1 = dense_mtx::create(exec, gko::dim<2>(2 * nelems, 1));
@@ -377,7 +379,7 @@ int main()
         x1->at(i + nelems, 0) = v1->at(i, 0);
     }
 
-    // Generate solver
+    /// Generate solver
     // use Ic or Jacobi
     auto solver_gen =
         gko::solver::Cg<>::build()
@@ -387,7 +389,9 @@ int main()
                                .with_tolerance(1e-6)
                                .on(exec))
             .on(exec);
-    auto solver_x = solver_gen->generate(gko::give(LHS));
+
+    auto solver_u = solver_gen->generate(gko::give(MplusA_u));
+    auto solver_v = solver_gen->generate(gko::give(MplusA_v));
 
     vtkNew<vtkProgrammableFilter> filter;
 
@@ -398,10 +402,14 @@ int main()
                           tau,
                           f,
                           k,
-                          std::move(x1),
-                          std::move(x2),
-                          std::move(RHS),
-                          std::move(solver_x),
+                          std::move(u1),
+                          std::move(v1),
+                          std::move(u2),
+                          std::move(v2),
+                          std::move(MminusA_u),
+                          std::move(MminusA_v),
+                          std::move(solver_u),
+                          std::move(solver_v),
                           std::move(exec)};
     state.data->SetNumberOfComponents(1);
     state.data->SetNumberOfTuples(init_m.points.size());

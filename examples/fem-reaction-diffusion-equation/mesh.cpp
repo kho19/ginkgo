@@ -36,6 +36,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <limits>
 #include <map>
 #include <string>
+#include "helper.hpp"
 
 
 mesh parse_obj(std::istream& stream)
@@ -96,19 +97,21 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
                    std::unique_ptr<gko::matrix::Dense<double>>& tri_2D,
                    double& area, const std::shared_ptr<gko::Executor>& exec)
 {
+    double nearly_zero = 1e-9;
+    // two vectors that span the triangle
     std::vector<double> temp1;
     temp1.reserve(3);
     std::vector<double> temp2;
     temp2.reserve(3);
+    // Givens rotations
     auto G = gko::initialize<gko::matrix::Dense<>>(
         {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, exec);
     auto G1 = gko::initialize<gko::matrix::Dense<>>(
         {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, exec);
     auto G2 = gko::initialize<gko::matrix::Dense<>>(
         {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, exec);
-
+    // Givens parameters: hypotenuse, cosine, sine
     double r, c, s;
-
 
     // Vector 0 -> 1
     temp1.push_back(m.points.at(tri.at(1)).at(0) -
@@ -125,17 +128,6 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
     temp2.push_back(m.points.at(tri.at(2)).at(2) -
                     m.points.at(tri.at(0)).at(2));
 
-    // area of triangle
-    area = 0.5 *
-           std::sqrt(
-               std::pow(temp1.at(1) * temp2.at(2) - temp1.at(2) * temp2.at(1),
-                        (int)2) +
-               std::pow(temp1.at(2) * temp2.at(0) - temp1.at(0) * temp2.at(2),
-                        (int)2) +
-               std::pow(temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0),
-                        (int)2));
-    assert(area != 0);
-
     // tri normal vector via cross product
     auto normal = gko::initialize<gko::matrix::Dense<>>(
         {temp1.at(1) * temp2.at(2) - temp1.at(2) * temp2.at(1),
@@ -143,44 +135,44 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
          temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0)},
         exec);
 
-    // check that normal vector doesn't already (almost) point in z direction
-    // TODO: is 10*min a good value?
-    if (std::hypot(normal->at(0), normal->at(1)) <
-        std::numeric_limits<double>::min() * 10) {
-        G = gko::initialize<gko::matrix::Dense<>>(
-            {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}, exec);
-    } else {
-        // givens rotation x -> 0
-        // the signbit ensures that rotation always occurs to give a normal
-        // vector pointing in positive z direction.
-        auto sign = std::signbit(normal->at(0)) == std::signbit(normal->at(2))
-                        ? 1.0
-                        : -1.0;
-        r = std::hypot(normal->at(0), normal->at(2));
-        if (r < std::numeric_limits<double>::min() * 10) {
-            c = 1;
-            s = 0;
-        } else {
-            c = std::abs(normal->at(2)) / r;
-            s = sign * std::abs(normal->at(0)) / r;
-        }
-        G1 = gko::initialize<gko::matrix::Dense<>>(
-            {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}}, exec);
-        auto temp_normal =
-            gko::initialize<gko::matrix::Dense<>>({0.0, 0.0, 0.0}, exec);
-        G1->apply(gko::lend(normal), gko::lend(temp_normal));
+    // Area of triangle using half the magnitude of the cross product vector
+    area = 0.5 * std::sqrt(std::pow(normal->at(0), (int)2) +
+                           std::pow(normal->at(1), (int)2) +
+                           std::pow(normal->at(2), (int)2));
+    assert(area > nearly_zero);
 
-        // givens rotation y -> 0
-        sign = std::signbit(normal->at(1)) == std::signbit(normal->at(2))
-                   ? 1.0
-                   : -1.0;
-        r = std::hypot(temp_normal->at(1), temp_normal->at(2));
-        c = std::abs(temp_normal->at(2)) / r;
-        s = sign * std::abs(temp_normal->at(1)) / r;
-        G2 = gko::initialize<gko::matrix::Dense<>>(
-            {{1.0, 0.0, 0.0}, {0.0, c, -s}, {0.0, s, c}}, exec);
-        G2->apply(gko::lend(G1), gko::lend(G));
+    // Givens rotation normal vector x comp -> 0
+    // Signbit ensures that rotation always occurs to give a normal
+    // vector pointing in z direction.
+    auto sign =
+        std::signbit(normal->at(0)) == std::signbit(normal->at(2)) ? 1.0 : -1.0;
+    r = std::hypot(normal->at(0), normal->at(2));
+    // If normal vector has only y component, no rotation needed in this stage
+    if (r < nearly_zero) {
+        c = 1;
+        s = 0;
+    } else {
+        c = std::abs(normal->at(2)) / r;
+        s = sign * std::abs(normal->at(0)) / r;
     }
+    // Init and apply Givens matrix
+    G1 = gko::initialize<gko::matrix::Dense<>>(
+        {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}}, exec);
+    auto temp_normal =
+        gko::initialize<gko::matrix::Dense<>>({0.0, 0.0, 0.0}, exec);
+    G1->apply(gko::lend(normal), gko::lend(temp_normal));
+    assert(temp_normal->at(0) < nearly_zero);
+
+    // Givens rotation normal vector y comp -> 0
+    sign =
+        std::signbit(normal->at(1)) == std::signbit(normal->at(2)) ? 1.0 : -1.0;
+    r = std::hypot(temp_normal->at(1), temp_normal->at(2));
+    c = std::abs(temp_normal->at(2)) / r;
+    s = sign * std::abs(temp_normal->at(1)) / r;
+    G2 = gko::initialize<gko::matrix::Dense<>>(
+        {{1.0, 0.0, 0.0}, {0.0, c, -s}, {0.0, s, c}}, exec);
+    G2->apply(gko::lend(G1), gko::lend(G));
+
     /* reuse G1 for triangle verts
      * |x0, x1, x2|
      * |y0, y1, y2|
@@ -199,10 +191,11 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
     }
     // apply givens rotation reusing G2
     G->apply(gko::lend(G1), gko::lend(G2));
-    // TODO: could do this without givens rotation? Just subtract z values as
-    // well?
+    /// Test on normal vector
+    G->apply(gko::lend(normal), gko::lend(temp_normal));
 
-    /* construct special matrix
+    /* Construct stiffness matrix precursor
+     * See https://en.wikipedia.org/wiki/Stiffness_matrix for details
      * |x2-x1, x0-x2, x1-x0|
      * |y2-y1, y0-y2, y1-y0|
      */
@@ -211,6 +204,14 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
             tri_2D->at(j, i) = G2->at(j, (2 + i) % 3) - G2->at(j, (1 + i) % 3);
         }
     }
+
+    // TODO: continue here by checking that triangle is rotated correctly
+    // (compare triangle coords and the end result)
+    //  Understand the 2x3 matrix from the wiki article and add documentation
+    //  here for this.
+    print_mat(temp_normal);
+    print_mat(G2);
+    print_mat(tri_2D);
 }
 
 
