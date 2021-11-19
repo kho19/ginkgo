@@ -93,6 +93,14 @@ double tri_area(const std::array<point_id, 3>& tri, const mesh& m)
     return area;
 }
 
+/*
+ * Maps triangles in 3D space onto the xy plane using Givens rotations.
+ * Absolute coordinates of the triangle vertices are obviously changed.
+ * This does not affect entries in the stiffness matrix as these depend on the
+ * products of gradients of linear functions which are not affected by
+ * rotations. However, the association with a particular vertex (nodal basis
+ * function) must be maintained for a correct end result.
+ */
 void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
                    std::unique_ptr<gko::matrix::Dense<double>>& tri_2D,
                    double& area, const std::shared_ptr<gko::Executor>& exec)
@@ -134,6 +142,8 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
          temp1.at(2) * temp2.at(0) - temp1.at(0) * temp2.at(2),
          temp1.at(0) * temp2.at(1) - temp1.at(1) * temp2.at(0)},
         exec);
+    auto temp_normal = gko::matrix::Dense<>::create(exec, gko::dim<2>(3, 1));
+
 
     // Area of triangle using half the magnitude of the cross product vector
     area = 0.5 * std::sqrt(std::pow(normal->at(0), (int)2) +
@@ -158,14 +168,13 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
     // Init and apply Givens matrix
     G1 = gko::initialize<gko::matrix::Dense<>>(
         {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}}, exec);
-    auto temp_normal =
-        gko::initialize<gko::matrix::Dense<>>({0.0, 0.0, 0.0}, exec);
     G1->apply(gko::lend(normal), gko::lend(temp_normal));
     assert(temp_normal->at(0) < nearly_zero);
 
     // Givens rotation normal vector y comp -> 0
-    sign =
-        std::signbit(normal->at(1)) == std::signbit(normal->at(2)) ? 1.0 : -1.0;
+    sign = std::signbit(temp_normal->at(1)) == std::signbit(temp_normal->at(2))
+               ? 1.0
+               : -1.0;
     r = std::hypot(temp_normal->at(1), temp_normal->at(2));
     c = std::abs(temp_normal->at(2)) / r;
     s = sign * std::abs(temp_normal->at(1)) / r;
@@ -189,29 +198,34 @@ void tri_map_3D_2D(const std::array<point_id, 3>& tri, const mesh& m,
         j = 0;
         ++i;
     }
+
+    // Test rotation on original normal vector
+    G->apply(gko::lend(normal), gko::lend(temp_normal));
+    assert(temp_normal->at(0) < nearly_zero);
+    assert(temp_normal->at(1) < nearly_zero);
+    auto len1 = std::pow(normal->at(0), (int)2) +
+                std::pow(normal->at(1), (int)2) +
+                std::pow(normal->at(2), (int)2);
+    auto len2 = std::pow(temp_normal->at(0), (int)2) +
+                std::pow(temp_normal->at(1), (int)2) +
+                std::pow(temp_normal->at(2), (int)2);
+    assert(len1 - len2 < nearly_zero);
+
     // apply givens rotation reusing G2
     G->apply(gko::lend(G1), gko::lend(G2));
-    /// Test on normal vector
-    G->apply(gko::lend(normal), gko::lend(temp_normal));
 
-    /* Construct stiffness matrix precursor
-     * See https://en.wikipedia.org/wiki/Stiffness_matrix for details
+    /* Construct stiffness matrix precursor tri_2D
      * |x2-x1, x0-x2, x1-x0|
      * |y2-y1, y0-y2, y1-y0|
+     * Local contribution to stiffness matrix given by 3x3 matrix tri_2D'*tri_2D
+     * / (4*tri_area) See https://en.wikipedia.org/wiki/Stiffness_matrix for
+     * details
      */
     for (j = 0; j < 2; ++j) {
         for (i = 0; i < 3; ++i) {
             tri_2D->at(j, i) = G2->at(j, (2 + i) % 3) - G2->at(j, (1 + i) % 3);
         }
     }
-
-    // TODO: continue here by checking that triangle is rotated correctly
-    // (compare triangle coords and the end result)
-    //  Understand the 2x3 matrix from the wiki article and add documentation
-    //  here for this.
-    print_mat(temp_normal);
-    print_mat(G2);
-    print_mat(tri_2D);
 }
 
 

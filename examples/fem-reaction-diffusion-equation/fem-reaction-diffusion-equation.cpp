@@ -96,15 +96,25 @@ struct animation_state {
     std::shared_ptr<executor> exec;
 };
 
-// TODO: add comments explaining what is going on here
+/* Mass (M) and stiffness (A) matrices are generated.
+ * To use well known methods for 2D each triangle is oriented to lie in the xy
+ * plane using Givens rotations and z coordinate is ignored. The error
+ * introduced by this simplification is related to the curvature of the 3D mesh
+ * at that point and the area spanned by a nodal basis function. Using a finer
+ * mesh i.e. decreasing the area of the support of the nodal basis function
+ * should decrease the error of this simplification.
+ */
 void generate_MA(const navigatable_mesh& m,
                  gko::matrix_assembly_data<double, int>& M,
                  gko::matrix_assembly_data<double, int>& A,
                  const std::shared_ptr<executor>& exec)
 {
-    /* special helper matrix
+    /* Construct stiffness matrix precursor tri_2D
      * |x2-x1, x0-x2, x1-x0|
      * |y2-y1, y0-y2, y1-y0|
+     * Local contribution to stiffness matrix given by 3x3 matrix tri_2D'*tri_2D
+     * / (4*tri_area) See https://en.wikipedia.org/wiki/Stiffness_matrix for
+     * details
      */
     auto tri_2D =
         gko::initialize<dense_mtx>({{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, exec);
@@ -122,14 +132,16 @@ void generate_MA(const navigatable_mesh& m,
         trans_tri_2D->apply(gko::lend(tri_2D), gko::lend(local_A));
         alpha->at(0, 0) = 1 / (4 * tri_area);
         local_A->scale(gko::lend(alpha));
+
+        // local mass matrix M fully determined by the triangles area.
+        // off diagonals = tri_area/12. diagonals = tri_area/6.
+        // Results from 2nd order quadrature rule on triangles with nodes at
+        // edge midpoints
         auto delta_M = tri_area / 12;
 
         // Fill mass matrix (M) and stiffness matrix (A)
-        // TODO: something going wrong here. Matrices have 6 entries per row
-        // initially but 7 after a while. 6 is correct for the simples sphere.
-        // also check how local_A is constructed and at which points elements
-        // from local_A are added to the matrix. This could be in the wrong
-        // order.
+        // Entry A(i,j) corresponds with interaction between nodal basis
+        // functions from nodes i and j
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) {
                 A.add_value(tri.at(i), tri.at(j), local_A->at(i, j));
@@ -170,7 +182,7 @@ void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m, int num_seeds,
     auto u_data = u->get_values();
     auto v_data = v->get_values();
     auto nelems = u->get_size()[0];
-    // way through points
+    // generate random list of seed edges
     std::random_device dev;
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist(
@@ -243,7 +255,7 @@ void animate(void* data)
 
 int main()
 {
-    /// Construct mesh from obj file
+    // Construct mesh from obj file
     vtkNew<vtkNamedColors> colors;
     // TODO: make input file interactive and add default independently from
     // build folder location
@@ -253,7 +265,7 @@ int main()
     auto m = navigatable_mesh(init_m);
     auto poly_data = init_m.to_vtk();
 
-    /// Define model parameters
+    // Define model parameters
     // diffusion factors
     auto Du = 0.0025;
     auto Dv = 0.00125;
@@ -269,7 +281,7 @@ int main()
     int num_seeds = 5;
     int seed_depth = 5;
 
-    /// Construct mass (M) and stiffness (A) matrices
+    // Construct mass (M) and stiffness (A) matrices
     // TODO: consider adding interactive exec config like in poisson-solver
     auto exec = executor::create();
     auto nelems = m.points.size();
@@ -363,8 +375,6 @@ int main()
     auto LHS = mtx::create(exec, gko::dim<2>(2 * nelems, 2 * nelems));
     LHS->read(LHS_data);
 
-    print_mat(gko::lend(M), exec);
-    print_mat(gko::lend(A), exec);
     // Set initial conditions
     auto u1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
     auto v1 = dense_mtx::create(exec, gko::dim<2>(nelems, 1));
