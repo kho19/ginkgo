@@ -1,1 +1,1 @@
-Assemble a 2D finite difference matrix. Use it to build an implicit Euler integrator.
+Assemble a 2D finite element matrix. Use it to build an Crank-Nicolson integrator and solve a reaction diffusion equation with Strang splitting.

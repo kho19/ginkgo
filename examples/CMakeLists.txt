@@ -30,7 +30,8 @@ set(EXAMPLES_LIST
     performance-debugging
     preconditioner-export
     schroedinger-splitting
-    simple-solver-logging)
+    simple-solver-logging
+        fem-reaction-diffusion-equation)
 
 if(GINKGO_BUILD_CUDA AND GINKGO_BUILD_OMP)
     list(APPEND EXAMPLES_LIST custom-matrix-format)
@@ -45,23 +46,6 @@ if(OpenCV_FOUND)
     list(APPEND EXAMPLES_LIST heat-equation)
 else()
     message(STATUS "No OpenCV found, disabling heat-equation example")
-endif()
-
-find_package(VTK COMPONENTS
-        CommonColor
-        CommonCore
-        IOGeometry
-        InteractionStyle
-        RenderingContextOpenGL2
-        RenderingCore
-        RenderingFreeType
-        RenderingGL2PSOpenGL2
-        RenderingOpenGL2
-        QUIET)
-if (VTK_FOUND)
-    list(APPEND EXAMPLES_LIST fem-reaction-diffusion-equation)
-else()
-    message(STATUS "No VTK found, disabling fem-reaction-diffusion-equation example")
 endif()
 
 if(GINKGO_HAVE_PAPI_SDE)

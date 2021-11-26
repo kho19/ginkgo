@@ -1,5 +1,4 @@
 <h1>Results</h1>
-The program will generate a video file named heat.mp4 and output the timestamp
-of each generated frame.
+The program will display an live animation of the chemical concentration of v changing as a result of the reaction diffusion process occurring on the surface of the chosen mesh.
 
 <h3> Comments about programming and debugging </h3>

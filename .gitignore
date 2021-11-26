@@ -35,6 +35,11 @@ include/config.hpp
 *.lo
 *.o
 *.obj
+!cube.obj
+!cube16.obj
+!dragon.obj
+!sphere.obj
+!sphere6.obj
 
 # Precompiled Headers
 *.gch

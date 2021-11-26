@@ -1,1 +1,1 @@
-simple-solver three-pt-stencil-solver
+simple-solver poisson-solver heat-equation

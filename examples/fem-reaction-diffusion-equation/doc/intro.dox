@@ -1,40 +1,55 @@
 <a name="Intro"></a>
 <h1>Introduction</h1>
-This example solves a 2D heat conduction equation
+This example solves a 2D reaction diffusion equation
 
-$
-    u : [0, d]^2 \rightarrow R\\
-    \partial_t u = \delta u + f
-$
+\begin{equation}
+    \begin{aligned}
+    \partial_tu &= \delta_u\Delta u-uv^2+f(1-u),\\
+    \partial_tv &= \delta_v\Delta v+uv^2-(f+k)v.
+    \end{aligned}
+\end{equation}
 
-with Dirichlet boundary conditions and given initial condition and
-constant-in-time source function f.
+on a 2D manifold without boundaries, with given initial conditions and fixed parameters $\delta_u, \delta_v, f, k$.
 
-The partial differential equation (PDE) is solved with a finite difference
-spatial discretization on an equidistant grid: For `n` grid points,
-and grid distance $h = 1/n$ we write
+The varying concentration of two reacting and diffusing chemicals $U$ and $V$ are taken to represent the pigment concentration on a two dimensional manifold. By changing the parameters $\delta_u$, $\delta_v$, $f$ and $k$ different patterns form.
 
-$
-    u_{i,j}' =
-    \alpha\frac{u_{i-1,j}+u_{i+1,j}+u_{i,j-1}+u_{i,j+1}-4u_{i,j}}{h^2}+f_{i,j}
-$
+The parameters $\delta_u$ and $\delta_v$ represent the diffusion coefficients of each chemical respectively. The term $uv^2$ accounts for the reaction $U + 2V\rightarrow 3V$ that converts $U$ into $V$. The chemical $U$ is replenished at a rate proportional to $1-u$ given by the feed rate $f$. Finally, the term $-(f+k)v$ models the reaction $V\rightarrow P$ to an inert product $P$ counteracting the buildup of $V$.
 
-We then build an implicit Euler integrator by discretizing with time step $\tau$
+Equation \eqref{eq:teq} is a time-dependent semi-linear elliptic PDE and as such cannot be directly solved using finite elements. In this project a splitting method is chosen to handle the non-linearity. This involves numerical treatment of the diffusion term and the reaction term in two separate steps. Equation \eqref{eq:teq} is split as shown in equation \eqref{eq:split} and the approximate solutions of $u$ and $v$ in \eqref{eq:split1} and \eqref{eq:split2} are updated alternately.
+\begin{subequations}
+    \label{eq:split}
+    \begin{equation}
+        \label{eq:split1}
+        \begin{aligned}
+            \partial_tu &= \delta_u\Delta u,\\
+            \partial_tv &= \delta_v\Delta v.
+        \end{aligned}
+    \end{equation}
+    \begin{equation}
+        \label{eq:split2}
+        \begin{aligned}
+            \partial_tu &=-uv^2+f(1-u),\\
+            \partial_tv &=uv^2-(f+k)v.
+        \end{aligned}
+    \end{equation}
+\end{subequations}
 
-$
-    \frac{u_{i,j}^{k+1} - u_{i,j}^k}{\tau} =
-    \alpha\frac{u_{i-1,j}^{k+1}+u_{i+1,j}^{k+1}
-               -u_{i,j-1}^{k+1}-u_{i,j+1}^{k+1}+4u_{i,j}^{k+1}}{h^2}
-    +f_{i,j}
-$
+The diffusion term in equation \eqref{eq:split1} is approximated using the FEM.
 
-and solve the resulting linear system for $ u_{\cdot}^{k+1}$ using Ginkgo's CG
-solver preconditioned with an incomplete Cholesky factorization for each time
-step, occasionally writing the resulting grid values into a video file using
-OpenCV and a custom color mapping.
+This results in a system of ODE which is approximated using the Crank-Nicolson method with a step size of $\tau$ resulting in the linear system
+\begin{equation}
+\label{eq:cn}
+    (M+\delta_u\frac{\tau}{2}A)\cdot \bm{x}_n = (M-\delta_u\frac{\tau}{2}A)\cdot \bm{x}_{n-1}
+\end{equation}
+which must be solved in each step.
 
-The intention of this example is to provide a mini-app showing matrix assembly,
-vector initialization, solver setup and the use of Ginkgo in a more complex
-setting.
+The non-linear reaction term \eqref{eq:split2} is approximated using the explicit Euler method. All the nodal function values are directly updated in one step according to
+\begin{align}
+   x^i_n &= x^i_{n-1} + \tau (-x^i_{n-1}(y^i_{n-1})^2 + f(1-x^i_{n-1})),\\
+   y^i_n &= y^i_{n-1} + \tau (x^i_{n-1}(y^i_{n-1})^2 - (f+k)y^i_{n-1}) \quad i\in\{1,\dots,n_i\}.
+\end{align}.
+
+Similar to the heat equation example, the intention of this example is to provide a mini-app showing matrix assembly,
+vector initialization, solver setup. This example is more complicated than the head equation.
 
 <h3> About the example </h3>

@@ -1,6 +1,5 @@
 #!/bin/bash
 
-#TODO change this
 # set up script
 if [ $# -ne 1 ]; then
     echo -e "Usage: $0 GINKGO_BUILD_DIRECTORY"
@@ -11,10 +10,9 @@ THIS_DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )
 
 source ${THIS_DIR}/../build-setup.sh
 
+#TODO might need to add something for linking VTK?
 # build
-${CXX} -std=c++14 -o ${THIS_DIR}/heat-equation \
-       ${THIS_DIR}/heat-equation.cpp \
+${CXX} -std=c++14 -o ${THIS_DIR}/fem-reaction-diffusion-equation \
+       ${THIS_DIR}/fem-reaction-diffusion-equation.cpp \
        -I${THIS_DIR}/../../include -I${BUILD_DIR}/include \
-       `pkg-config --cflags opencv4` \
-       -L${THIS_DIR} ${LINK_FLAGS} \
-       `pkg-config --libs opencv4`
+       -L${THIS_DIR} ${LINK_FLAGS}

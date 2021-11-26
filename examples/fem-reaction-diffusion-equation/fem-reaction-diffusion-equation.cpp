@@ -54,7 +54,19 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "mesh.hpp"
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
-using executor = gko::OmpExecutor;
+
+// Default config values
+// diffusion factors
+constexpr double def_Du = 0.0025;
+constexpr double def_Dv = 0.00125;
+// feed and kill rates
+constexpr double def_f = 0.038;
+constexpr double def_k = 0.061;
+// number of simulation steps per second
+constexpr double def_steps_per_sec = 4;
+// initialisation parameters
+int def_num_seeds = 3;
+int def_seed_depth = 3;
 
 class timer : public vtkCommand {
 public:
@@ -91,9 +103,10 @@ struct animation_state {
     double k;
     std::unique_ptr<dense_mtx> x1;
     std::unique_ptr<dense_mtx> x2;
+    std::unique_ptr<dense_mtx> cpu_x1;
     std::unique_ptr<mtx> RHS;
     std::unique_ptr<gko::solver::Cg<>> solver_x;
-    std::shared_ptr<executor> exec;
+    std::shared_ptr<gko::Executor> exec;
 };
 
 /* Mass (M) and stiffness (A) matrices are generated.
@@ -107,7 +120,7 @@ struct animation_state {
 void generate_MA(const navigatable_mesh& m,
                  gko::matrix_assembly_data<double, int>& M,
                  gko::matrix_assembly_data<double, int>& A,
-                 const std::shared_ptr<executor>& exec)
+                 const std::shared_ptr<gko::Executor>& exec)
 {
     /* Construct stiffness matrix precursor tri_2D
      * |x2-x1, x0-x2, x1-x0|
@@ -228,22 +241,28 @@ void animate(void* data)
 {
     auto state = static_cast<animation_state*>(data);
     auto nelems = state->x1->get_num_stored_elements() / 2;
-    std::cout << "Global time: " << state->time << std::endl;
-    state->time += state->tau;
-    // Simulation step
-    // Update diffusion term (half step: strang splitting)
-    state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
-    state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
 
-    // update nonlinear term
-    nonlin_update(gko::lend(state->x1), state->f, state->k, state->tau);
-    // Update diffusion term
-    state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
-    state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
+    // perform 10 steps for each update of the graphic
+    for (int i = 0; i < 10; ++i) {
+        std::cout << "Global time: " << state->time << std::endl;
+        state->time += state->tau;
+        // Simulation step
+        // Update diffusion term (half step: strang splitting)
+        state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
+        state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
 
+        // update nonlinear term
+        nonlin_update(gko::lend(state->x1), state->f, state->k, state->tau);
+        // Update diffusion term
+        state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
+        state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
+    }
 
+    // update graphic
+    // copy solution back to cpu for visualisation
+    state->cpu_x1->copy_from(state->x1.get());
     for (int i = 0; i < state->m->points.size(); i++) {
-        state->data->SetTuple1(i, state->x1->at(nelems + i, 0));
+        state->data->SetTuple1(i, state->cpu_x1->at(nelems + i, 0));
     }
     state->filter->GetPolyDataOutput()->CopyStructure(
         state->filter->GetPolyDataInput());
@@ -253,37 +272,80 @@ void animate(void* data)
 }
 
 
-int main()
+int main(int argc, char** argv)
 {
+    // Print version information
+    std::cout << gko::version_info::get() << std::endl;
+
+    if (argc == 2 && std::string(argv[1]) == "--help") {
+        std::cerr << "Usage: " << argv[0]
+                  << " [mesh] [executor] [Du] [Dv] [f] [k] [steps/sec] [num "
+                     "seeds] [seed depth]"
+                  << std::endl;
+        std::exit(-1);
+    }
+
+    auto mesh_string_temp = argc >= 2 ? argv[1] : "sphere";
+    const auto exec_string = argc >= 3 ? argv[2] : "reference";
+    // diffusion factors
+    const auto Du = argc >= 4 ? std::strtod(argv[3], (char**)nullptr) : def_Du;
+    const auto Dv = argc >= 5 ? std::strtod(argv[4], (char**)nullptr) : def_Dv;
+    // feed and kill rates
+    const auto f = argc >= 6 ? std::strtod(argv[5], (char**)nullptr) : def_f;
+    const auto k = argc >= 7 ? std::strtod(argv[6], (char**)nullptr) : def_k;
+    // number of simulation steps per second
+    const auto steps_per_sec =
+        argc >= 8 ? std::strtod(argv[7], (char**)nullptr) : def_steps_per_sec;
+    // Set initialisation parameters
+    const auto num_seeds =
+        argc >= 9 ? std::strtol(argv[8], (char**)nullptr, 10) : def_num_seeds;
+    const auto seed_depth =
+        argc >= 10 ? std::strtol(argv[9], (char**)nullptr, 10) : def_seed_depth;
+    // time step size for the simulation
+    const auto tau = 1.0 / steps_per_sec;
+
+    // Figure out where to run the code
+    std::map<std::string, std::function<std::shared_ptr<gko::Executor>()>>
+        exec_map{
+            {"omp", [] { return gko::OmpExecutor::create(); }},
+            {"cuda",
+             [] {
+                 return gko::CudaExecutor::create(0, gko::OmpExecutor::create(),
+                                                  true);
+             }},
+            {"hip",
+             [] {
+                 return gko::HipExecutor::create(0, gko::OmpExecutor::create(),
+                                                 true);
+             }},
+            {"dpcpp",
+             [] {
+                 return gko::DpcppExecutor::create(0,
+                                                   gko::OmpExecutor::create());
+             }},
+            {"reference", [] { return gko::ReferenceExecutor::create(); }}};
+
+    // executor where Ginkgo will perform the computation
+    const auto exec = exec_map.at(exec_string)();  // throws if not valid
+    // executor where the application initialized the data
+    const auto cpu_exec = exec->get_master();
+
+    // mesh obj file to be used
+    std::stringstream ss;
+    ss << "data/" << mesh_string_temp << ".obj";
+    const auto mesh_string = ss.str();
+    std::ifstream stream{mesh_string};
+
     // Construct mesh from obj file
     vtkNew<vtkNamedColors> colors;
-    // TODO: make input file interactive and add default independently from
-    // build folder location
-    std::ifstream stream{
-        "../../../examples/fem-reaction-diffusion-equation/data/sphere.obj"};
     auto init_m = parse_obj(stream);
     auto m = navigatable_mesh(init_m);
     auto poly_data = init_m.to_vtk();
 
-    // Define model parameters
-    // diffusion factors
-    auto Du = 0.0025;
-    auto Dv = 0.00125;
-    // feed and kill rates
-    auto f = 0.038;
-    auto k = 0.061;
-    // number of simulation steps per second
-    auto steps_per_sec = 4;
-    // time step size for the simulation
-    auto tau = 1.0 / steps_per_sec;
-
-    // Set initialisation parameters
-    int num_seeds = 5;
-    int seed_depth = 5;
-
     // Construct mass (M) and stiffness (A) matrices
-    // TODO: consider adding interactive exec config like in poisson-solver
-    auto exec = executor::create();
+    // Matrices and vectors are constructed on the GPU (if present)
+    // Solution vector is copied back to the CPU at regular intervals to update
+    // the visualisation
     auto nelems = m.points.size();
     auto M_data =
         gko::matrix_assembly_data<double, int>(gko::dim<2>(nelems, nelems));
@@ -387,6 +449,8 @@ int main()
         x1->at(i + nelems, 0) = v1->at(i, 0);
     }
 
+    auto cpu_x1 = gko::clone(cpu_exec, x1);
+
     // Generate solver
     // use Ic or Jacobi
     auto solver_gen =
@@ -410,9 +474,10 @@ int main()
                           k,
                           std::move(x1),
                           std::move(x2),
+                          std::move(cpu_x1),
                           std::move(RHS),
                           std::move(solver_x),
-                          std::move(exec)};
+                          exec};
     state.data->SetNumberOfComponents(1);
     state.data->SetNumberOfTuples(init_m.points.size());
     filter->SetInputData(poly_data);
