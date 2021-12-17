@@ -30,12 +30,6 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************<GINKGO LICENSE>*******************************/
 
-//
-// Created by heisenberg on 10.08.21.
-//
-
-// TODO: delete helper file when done
-
 #pragma once
 
 using mtx = gko::matrix::Csr<>;

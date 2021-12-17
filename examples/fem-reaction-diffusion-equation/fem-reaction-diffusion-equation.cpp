@@ -303,8 +303,8 @@ int main(int argc, char** argv)
         argc >= 10 ? std::strtol(argv[9], (char**)nullptr, 10) : def_seed_depth;
     // time step size for the simulation
     const auto tau = 1.0 / steps_per_sec;
-
-    // Figure out where to run the code
+    // TODO: Do not know if this will run on gpu
+    //  Figure out where to run the code
     std::map<std::string, std::function<std::shared_ptr<gko::Executor>()>>
         exec_map{
             {"omp", [] { return gko::OmpExecutor::create(); }},

@@ -9,13 +9,13 @@ This example solves a 2D reaction diffusion equation
     \end{aligned}
 \end{equation}
 
-on a 2D manifold without boundaries, with given initial conditions and fixed parameters $\delta_u, \delta_v, f, k$.
+using the finite element method on a 2D manifold without boundaries, with given initial conditions and fixed parameters $\delta_u, \delta_v, f, k$.
 
 The varying concentration of two reacting and diffusing chemicals $U$ and $V$ are taken to represent the pigment concentration on a two dimensional manifold. By changing the parameters $\delta_u$, $\delta_v$, $f$ and $k$ different patterns form.
 
 The parameters $\delta_u$ and $\delta_v$ represent the diffusion coefficients of each chemical respectively. The term $uv^2$ accounts for the reaction $U + 2V\rightarrow 3V$ that converts $U$ into $V$. The chemical $U$ is replenished at a rate proportional to $1-u$ given by the feed rate $f$. Finally, the term $-(f+k)v$ models the reaction $V\rightarrow P$ to an inert product $P$ counteracting the buildup of $V$.
 
-Equation \eqref{eq:teq} is a time-dependent semi-linear elliptic PDE and as such cannot be directly solved using finite elements. In this project a splitting method is chosen to handle the non-linearity. This involves numerical treatment of the diffusion term and the reaction term in two separate steps. Equation \eqref{eq:teq} is split as shown in equation \eqref{eq:split} and the approximate solutions of $u$ and $v$ in \eqref{eq:split1} and \eqref{eq:split2} are updated alternately.
+Equation \eqref{eq:teq} is a time-dependent semi-linear elliptic PDE and as such cannot be directly solved using finite elements. Strang splitting is used to handle the non-linearity. This involves numerical treatment of the diffusion term and the reaction term in separate steps. Equation \eqref{eq:teq} is split as shown in equation \eqref{eq:split} and the approximate solutions of $u$ and $v$ in \eqref{eq:split1} and \eqref{eq:split2} are updated alternately.
 \begin{subequations}
     \label{eq:split}
     \begin{equation}
@@ -43,13 +43,13 @@ This results in a system of ODE which is approximated using the Crank-Nicolson m
 \end{equation}
 which must be solved in each step.
 
-The non-linear reaction term \eqref{eq:split2} is approximated using the explicit Euler method. All the nodal function values are directly updated in one step according to
+The non-linear reaction term \eqref{eq:split2} is approximated using an explicit Euler update. All the nodal function values are directly updated in one step according to
 \begin{align}
    x^i_n &= x^i_{n-1} + \tau (-x^i_{n-1}(y^i_{n-1})^2 + f(1-x^i_{n-1})),\\
    y^i_n &= y^i_{n-1} + \tau (x^i_{n-1}(y^i_{n-1})^2 - (f+k)y^i_{n-1}) \quad i\in\{1,\dots,n_i\}.
 \end{align}.
 
 Similar to the heat equation example, the intention of this example is to provide a mini-app showing matrix assembly,
-vector initialization, solver setup. This example is more complicated than the head equation.
+vector initialization, solver setup. This example is more complicated than the heat equation.
 
 <h3> About the example </h3>
