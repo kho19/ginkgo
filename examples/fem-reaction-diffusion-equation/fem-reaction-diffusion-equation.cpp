@@ -30,7 +30,76 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************<GINKGO LICENSE>*******************************/
 
-// TODO: add description
+/*****************************<DESCRIPTION>***********************************
+This example solves a 2D reaction diffusion equation
+
+\begin{equation}
+\begin{aligned}
+\partial_tu &= \delta_u\Delta u-uv^2+f(1-u),\\
+    \partial_tv &= \delta_v\Delta v+uv^2-(f+k)v.
+    \end{aligned}
+\end{equation}
+
+using the finite element method on a 2D manifold without boundaries, with given
+initial conditions and fixed parameters $\delta_u, \delta_v, f, k$.
+
+The varying concentration of two reacting and diffusing chemicals $U$ and $V$
+are taken to represent the pigment concentration on a two dimensional manifold.
+By changing the parameters $\delta_u$, $\delta_v$, $f$ and $k$ different
+patterns form.
+
+The parameters $\delta_u$ and $\delta_v$ represent the diffusion coefficients of
+each chemical respectively. The term $uv^2$ accounts for the reaction $U +
+2V\rightarrow 3V$ that converts $U$ into $V$. The chemical $U$ is replenished at
+a rate proportional to $1-u$ given by the feed rate $f$. Finally, the term
+$-(f+k)v$ models the reaction $V\rightarrow P$ to an inert product $P$
+counteracting the buildup of $V$.
+
+Equation \eqref{eq:teq} is a time-dependent semi-linear elliptic PDE and as such
+cannot be directly solved using finite elements. Strang splitting is used to
+handle the non-linearity. This involves numerical treatment of the diffusion
+term and the reaction term in separate steps. Equation \eqref{eq:teq} is split
+as shown in equation \eqref{eq:split} and the approximate solutions of $u$ and
+$v$ in \eqref{eq:split1} and \eqref{eq:split2} are updated alternately.
+\begin{subequations}
+\label{eq:split}
+\begin{equation}
+\label{eq:split1}
+\begin{aligned}
+\partial_tu &= \delta_u\Delta u,\\
+\partial_tv &= \delta_v\Delta v.
+\end{aligned}
+\end{equation}
+\begin{equation}
+\label{eq:split2}
+\begin{aligned}
+\partial_tu &=-uv^2+f(1-u),\\
+\partial_tv &=uv^2-(f+k)v.
+\end{aligned}
+\end{equation}
+\end{subequations}
+
+The diffusion term in equation \eqref{eq:split1} is approximated using the FEM.
+This results in a system of ODE which is approximated using the Crank-Nicolson
+method with a step size of $\tau$ resulting in the linear system
+\begin{equation}
+\label{eq:cn}
+(M+\delta_u\frac{\tau}{2}A)\cdot \bm{x}_n = (M-\delta_u\frac{\tau}{2}A)\cdot
+\bm{x}_{n-1}
+\end{equation}
+which must be solved in each step.
+
+The non-linear reaction term \eqref{eq:split2} is approximated using an
+explicit Euler update. All the nodal function values are directly updated in one
+step according to
+\begin{align}
+x^i_n &= x^i_{n-1} + \tau (-x^i_{n-1}(y^i_{n-1})^2 + f(1-x^i_{n-1})),\\
+y^i_n &= y^i_{n-1} + \tau (x^i_{n-1}(y^i_{n-1})^2 - (f+k)y^i_{n-1}) \quad
+i\in\{1,\dots,n_i\}. \end{align}. Similar to the heat equation example, the
+intention of this example is to provide a mini-app showing matrix assembly,
+ vector initialization, solver setup. This example is more complicated than
+ the heat equation.
+*****************************<DESCRIPTION>**********************************/
 
 #include <ginkgo/ginkgo.hpp>
 
@@ -50,10 +119,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
 
+#include <ginkgo/kernels/kernel_declaration.hpp>
+
 #include "helper.hpp"
 #include "mesh.hpp"
 using mtx = gko::matrix::Csr<>;
 using dense_mtx = gko::matrix::Dense<>;
+
+GKO_DECLARE_UNIFIED(void nonlinear_update(
+    std::shared_ptr<const DefaultExecutor> exec, int nelems, double tau,
+    double f, double k, dense_mtx* x));
+
+GKO_REGISTER_UNIFIED_OPERATION(nonlinear_update, nonlinear_update);
 
 // Default config values
 // diffusion factors
@@ -220,23 +297,6 @@ void init_uv(dense_mtx* u, dense_mtx* v, navigatable_mesh& m, int num_seeds,
     }
 }
 
-// explicit local update of the non-linear terms
-void nonlin_update(dense_mtx* x, double f, double k, double tau)
-{
-    auto nelems = x->get_num_stored_elements() / 2;
-    for (int i = 0; i < nelems; ++i) {
-        x->at(i, 0) =
-            x->at(i, 0) +
-            tau * (-x->at(i, 0) *
-                       (x->at(nelems + i, 0) * x->at(nelems + i, 0) + f) +
-                   f);
-        x->at(nelems + i, 0) =
-            x->at(nelems + i, 0) +
-            tau * (x->at(nelems + i, 0) *
-                   (x->at(i, 0) * x->at(nelems + i, 0) - (f + k)));
-    }
-}
-
 void animate(void* data)
 {
     auto state = static_cast<animation_state*>(data);
@@ -252,7 +312,8 @@ void animate(void* data)
         state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
 
         // update nonlinear term
-        nonlin_update(gko::lend(state->x1), state->f, state->k, state->tau);
+        state->exec->run(make_nonlinear_update(nelems, state->tau, state->f,
+                                               state->k, gko::lend(state->x1)));
         // Update diffusion term
         state->RHS->apply(gko::lend(state->x1), gko::lend(state->x2));
         state->solver_x->apply(gko::lend(state->x2), gko::lend(state->x1));
@@ -277,7 +338,8 @@ int main(int argc, char** argv)
     // Print version information
     std::cout << gko::version_info::get() << std::endl;
 
-    if (argc == 2 && std::string(argv[1]) == "--help") {
+    if (argc == 2 && std::string(argv[1]) == "--help" ||
+        std::string(argv[1]) == "-h") {
         std::cerr << "Usage: " << argv[0]
                   << " [mesh] [executor] [Du] [Dv] [f] [k] [steps/sec] [num "
                      "seeds] [seed depth]"
